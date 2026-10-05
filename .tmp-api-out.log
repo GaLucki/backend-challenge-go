@@ -1,0 +1,3 @@
+{"time":"2026-10-05T18:33:37.8655413-03:00","level":"INFO","msg":"http server starting","addr":":18081","appEnv":"development"}
+{"time":"2026-10-05T18:33:38.0746431-03:00","level":"INFO","msg":"http request completed","correlationId":"41ac1f299e2596ef12fc6dc430d8e92b","method":"GET","path":"/health/live","durationMs":0}
+{"time":"2026-10-05T18:33:38.1946566-03:00","level":"INFO","msg":"http request completed","correlationId":"bb410a87a5d9b1566bf0e09a07b0c27d","method":"GET","path":"/health/ready","durationMs":0}
