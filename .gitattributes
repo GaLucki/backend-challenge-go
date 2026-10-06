@@ -1,0 +1,3 @@
+# LocalStack executes this Linux entrypoint after a Windows checkout as well.
+infra/localstack/*.py text eol=lf
+infra/localstack/Dockerfile text eol=lf

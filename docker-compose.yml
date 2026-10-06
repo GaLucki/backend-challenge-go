@@ -18,5 +18,27 @@ services:
       retries: 10
       start_period: 10s
 
+  localstack:
+    build: ./infra/localstack
+    image: wagering-localstack:phase7
+    container_name: wagering-localstack
+    restart: unless-stopped
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_ENDPOINT_STRATEGY: dynamic
+      SQS_VISIBILITY_SECONDS: ${SQS_VISIBILITY_SECONDS:-90}
+      SQS_MAX_RECEIVE_COUNT: ${SQS_MAX_RECEIVE_COUNT:-5}
+    ports:
+      - "${LOCALSTACK_PORT:-4566}:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal sqs get-queue-url --queue-name wager-transactions.fifo > /dev/null && awslocal sqs get-queue-url --queue-name wager-transactions-dlq.fifo > /dev/null && awslocal sqs get-queue-url --queue-name wager-events.fifo > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
 volumes:
   postgres_data:

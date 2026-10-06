@@ -7,6 +7,7 @@ var (
 	ErrInvalidPlayerID         = errors.New("invalid player id")
 	ErrInvalidCurrency         = errors.New("invalid wallet currency")
 	ErrInvalidVersion          = errors.New("invalid wallet version")
+	ErrVersionOverflow         = errors.New("wallet version overflow")
 	ErrNegativeBalance         = errors.New("wallet balance cannot be negative")
 	ErrCurrencyMismatch        = errors.New("currency mismatch")
 	ErrNonPositiveAmount       = errors.New("amount must be positive")

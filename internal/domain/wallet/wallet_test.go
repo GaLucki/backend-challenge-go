@@ -149,3 +149,21 @@ func TestNewValidation(t *testing.T) {
 		t.Fatalf("balance currency error = %v", err)
 	}
 }
+
+func TestVersionOverflowDoesNotChangeState(t *testing.T) {
+	for _, credit := range []bool{true, false} {
+		w, err := wallet.Rehydrate("w1", "p1", "BRL", mustMoney(t, 100, "BRL"), math.MaxInt64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		original := w
+		if credit {
+			err = w.Credit(mustMoney(t, 1, "BRL"))
+		} else {
+			err = w.Debit(mustMoney(t, 1, "BRL"))
+		}
+		if !errors.Is(err, wallet.ErrVersionOverflow) || w != original {
+			t.Fatalf("credit=%v wallet=%v error=%v", credit, w, err)
+		}
+	}
+}

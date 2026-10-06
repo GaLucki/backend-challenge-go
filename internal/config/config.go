@@ -30,44 +30,99 @@ type Config struct {
 	LogLevel        string
 	ShutdownTimeout time.Duration
 
-	DatabaseURL       string
-	DBMaxConns        int32
-	DBMinConns        int32
-	DBMaxConnLifetime time.Duration
-	DBMaxConnIdleTime time.Duration
-	DBConnectTimeout  time.Duration
-	DBHealthTimeout   time.Duration
+	DatabaseURL         string
+	DBMaxConns          int32
+	DBMinConns          int32
+	DBMaxConnLifetime   time.Duration
+	DBMaxConnIdleTime   time.Duration
+	DBConnectTimeout    time.Duration
+	DBHealthTimeout     time.Duration
+	PendingPollInterval time.Duration
+	PendingBaseDelay    time.Duration
+	PendingMaxDelay     time.Duration
+	PendingMaxAttempts  int32
+	PendingTTL          time.Duration
+	PendingBatchSize    int32
 
-	// Reserved for later phases (not connected in phase 1).
-	KeycloakURL        string
-	SQSEndpoint        string
-	AWSRegion          string
-	AWSAccessKeyID     string
-	AWSSecretAccessKey string
+	// Reserved for later phases.
+	KeycloakURL                                                   string
+	SQSEndpoint                                                   string
+	AWSRegion                                                     string
+	AWSAccessKeyID                                                string
+	AWSSecretAccessKey                                            string
+	AWSSessionToken                                               string
+	SQSEnabled                                                    bool
+	SQSQueueName                                                  string
+	SQSQueueURL                                                   string
+	SQSDLQName                                                    string
+	SQSConsumerName                                               string
+	SQSWaitSeconds                                                int32
+	SQSVisibilitySeconds                                          int32
+	SQSMaxMessages                                                int32
+	SQSConcurrency                                                int32
+	SQSProcessingTimeout                                          time.Duration
+	OutboxEnabled                                                 bool
+	EventQueueName, EventQueueURL                                 string
+	OutboxBatchSize                                               int32
+	OutboxPollInterval, OutboxBaseRetryDelay, OutboxMaxRetryDelay time.Duration
+	OutboxClaimDuration, OutboxPublishTimeout, OutboxStoreTimeout time.Duration
 }
 
 // Load reads configuration from environment variables and validates required fields.
 func Load() (Config, error) {
 	cfg := Config{
-		AppEnv:             getEnv("APP_ENV", defaultAppEnv),
-		HTTPPort:           getEnv("HTTP_PORT", defaultHTTPPort),
-		LogLevel:           strings.ToLower(getEnv("LOG_LEVEL", defaultLogLevel)),
-		ShutdownTimeout:    defaultShutdownTimeout,
-		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		DBMaxConns:         defaultDBMaxConns,
-		DBMinConns:         defaultDBMinConns,
-		DBMaxConnLifetime:  defaultDBMaxConnLifetime,
-		DBMaxConnIdleTime:  defaultDBMaxConnIdleTime,
-		DBConnectTimeout:   defaultDBConnectTimeout,
-		DBHealthTimeout:    defaultDBHealthTimeout,
-		KeycloakURL:        os.Getenv("KEYCLOAK_URL"),
-		SQSEndpoint:        os.Getenv("SQS_ENDPOINT"),
-		AWSRegion:          os.Getenv("AWS_REGION"),
-		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		AppEnv:              getEnv("APP_ENV", defaultAppEnv),
+		HTTPPort:            getEnv("HTTP_PORT", defaultHTTPPort),
+		LogLevel:            strings.ToLower(getEnv("LOG_LEVEL", defaultLogLevel)),
+		ShutdownTimeout:     defaultShutdownTimeout,
+		DatabaseURL:         strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		DBMaxConns:          defaultDBMaxConns,
+		DBMinConns:          defaultDBMinConns,
+		DBMaxConnLifetime:   defaultDBMaxConnLifetime,
+		DBMaxConnIdleTime:   defaultDBMaxConnIdleTime,
+		DBConnectTimeout:    defaultDBConnectTimeout,
+		DBHealthTimeout:     defaultDBHealthTimeout,
+		PendingPollInterval: time.Second,
+		PendingBaseDelay:    time.Second,
+		PendingMaxDelay:     time.Minute,
+		PendingMaxAttempts:  10,
+		PendingTTL:          15 * time.Minute,
+		PendingBatchSize:    50,
+		KeycloakURL:         os.Getenv("KEYCLOAK_URL"),
+		SQSEndpoint:         os.Getenv("SQS_ENDPOINT"),
+		AWSRegion:           getEnv("AWS_REGION", "us-east-1"),
+		AWSAccessKeyID:      os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey:  os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		AWSSessionToken:     os.Getenv("AWS_SESSION_TOKEN"),
+		SQSQueueName:        getEnv("SQS_QUEUE_NAME", "wager-transactions.fifo"),
+		SQSQueueURL:         getEnv("SQS_QUEUE_URL", ""),
+		SQSDLQName:          getEnv("SQS_DLQ_NAME", "wager-transactions-dlq.fifo"),
+		SQSConsumerName:     getEnv("SQS_CONSUMER_NAME", "wager-financial-v1"),
+		SQSWaitSeconds:      20, SQSVisibilitySeconds: 90, SQSMaxMessages: 10, SQSConcurrency: 4, SQSProcessingTimeout: 5 * time.Second,
 	}
 
 	var err error
+	if err = cfg.loadOutbox(); err != nil {
+		return Config{}, err
+	}
+	if raw := getEnv("SQS_ENABLED", "false"); raw != "" {
+		if cfg.SQSEnabled, err = strconv.ParseBool(raw); err != nil {
+			return Config{}, fmt.Errorf("invalid SQS_ENABLED")
+		}
+	}
+	for _, item := range []struct {
+		key    string
+		target *int32
+	}{
+		{"SQS_WAIT_SECONDS", &cfg.SQSWaitSeconds}, {"SQS_VISIBILITY_SECONDS", &cfg.SQSVisibilitySeconds}, {"SQS_MAX_MESSAGES", &cfg.SQSMaxMessages}, {"SQS_CONCURRENCY", &cfg.SQSConcurrency},
+	} {
+		if *item.target, err = int32Env(item.key, *item.target); err != nil {
+			return Config{}, err
+		}
+	}
+	if cfg.SQSProcessingTimeout, err = durationEnv("SQS_PROCESSING_TIMEOUT", cfg.SQSProcessingTimeout); err != nil {
+		return Config{}, err
+	}
 
 	if cfg.ShutdownTimeout, err = durationEnv("SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout); err != nil {
 		return Config{}, err
@@ -88,6 +143,25 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.DBHealthTimeout, err = durationEnv("DB_HEALTH_TIMEOUT", cfg.DBHealthTimeout); err != nil {
+		return Config{}, err
+	}
+	for _, item := range []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"PENDING_REFERENCE_POLL_INTERVAL", &cfg.PendingPollInterval},
+		{"PENDING_REFERENCE_BASE_DELAY", &cfg.PendingBaseDelay},
+		{"PENDING_REFERENCE_MAX_DELAY", &cfg.PendingMaxDelay},
+		{"PENDING_REFERENCE_TTL", &cfg.PendingTTL},
+	} {
+		if *item.target, err = durationEnv(item.key, *item.target); err != nil {
+			return Config{}, err
+		}
+	}
+	if cfg.PendingMaxAttempts, err = int32Env("PENDING_REFERENCE_MAX_ATTEMPTS", cfg.PendingMaxAttempts); err != nil {
+		return Config{}, err
+	}
+	if cfg.PendingBatchSize, err = int32Env("PENDING_REFERENCE_BATCH_SIZE", cfg.PendingBatchSize); err != nil {
 		return Config{}, err
 	}
 
@@ -151,7 +225,44 @@ func (c Config) Validate() error {
 	if c.DBHealthTimeout <= 0 {
 		return fmt.Errorf("DB_HEALTH_TIMEOUT must be positive")
 	}
+	if c.PendingPollInterval <= 0 || c.PendingBaseDelay < time.Microsecond || c.PendingMaxDelay < c.PendingBaseDelay || c.PendingTTL < time.Microsecond || c.PendingMaxAttempts < 1 || c.PendingBatchSize < 1 {
+		return fmt.Errorf("invalid PENDING_REFERENCE configuration: positive polling, attempts and batch required; base delay and TTL must be >= 1us; max delay must be >= base delay")
+	}
+	if err := c.validateSQS(); err != nil {
+		return err
+	}
+	if err := c.validateOutbox(); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+func (c Config) validateSQS() error {
+	if !c.SQSEnabled {
+		return nil
+	}
+	if strings.TrimSpace(c.AWSRegion) == "" || strings.TrimSpace(c.SQSConsumerName) == "" || !strings.HasSuffix(c.SQSQueueName, ".fifo") || !strings.HasSuffix(c.SQSDLQName, ".fifo") {
+		return fmt.Errorf("SQS region, consumer name and FIFO queue names are required")
+	}
+	if (c.AWSAccessKeyID == "") != (c.AWSSecretAccessKey == "") {
+		return fmt.Errorf("AWS access key and secret must be configured together")
+	}
+	for _, raw := range []string{c.SQSEndpoint, c.SQSQueueURL} {
+		if raw != "" {
+			u, err := url.Parse(raw)
+			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+				return fmt.Errorf("invalid SQS endpoint or queue URL")
+			}
+		}
+	}
+	if c.SQSWaitSeconds < 1 || c.SQSWaitSeconds > 20 || c.SQSMaxMessages < 1 || c.SQSMaxMessages > 10 || c.SQSConcurrency < 1 || c.SQSVisibilitySeconds < 1 || c.SQSVisibilitySeconds > 43200 || c.SQSProcessingTimeout <= 0 {
+		return fmt.Errorf("invalid SQS polling, concurrency or visibility settings")
+	}
+	// One receive may contain an entire group; reserve time for its sequential tail and ACK.
+	if c.SQSProcessingTimeout >= time.Duration(c.SQSVisibilitySeconds)*time.Second/time.Duration(c.SQSMaxMessages)-3*time.Second {
+		return fmt.Errorf("SQS visibility must exceed batch processing plus acknowledgement budget")
+	}
 	return nil
 }
 

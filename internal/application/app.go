@@ -9,6 +9,7 @@ import (
 	"github.com/junglegaming/backend-challenge-go/internal/adapter/postgres"
 	"github.com/junglegaming/backend-challenge-go/internal/config"
 	"github.com/junglegaming/backend-challenge-go/internal/observability"
+	"github.com/junglegaming/backend-challenge-go/internal/ports"
 	"go.uber.org/fx"
 )
 
@@ -19,11 +20,24 @@ var Module = fx.Options(
 		newLogger,
 		newReadyFlag,
 		postgres.NewPool,
+		postgres.NewRepositories,
+		postgres.NewUnitOfWork,
+		postgres.NewPublicationStore,
+		newFinancialService,
+		newPendingWorker,
+		func(r ports.Repositories) ports.ReversalRepository { return r.Reversals },
+		func(r ports.Repositories) ports.PendingReferenceRepository { return r.PendingReferences },
+		func(r ports.Repositories) ports.IdempotencyRepository { return r.Idempotency },
+		func(r ports.Repositories) ports.WalletRepository { return r.Wallets },
+		func(r ports.Repositories) ports.WagerTransactionRepository { return r.Wagers },
+		func(r ports.Repositories) ports.LedgerRepository { return r.Ledger },
+		func(r ports.Repositories) ports.InboxRepository { return r.Inbox },
+		func(r ports.Repositories) ports.OutboxRepository { return r.Outbox },
 		func(pool *pgxpool.Pool) httpadapter.DatabasePinger { return pool },
 		httpadapter.NewHealthHandler,
 		httpadapter.NewHandler,
 	),
-	fx.Invoke(httpadapter.RegisterServer),
+	fx.Invoke(httpadapter.RegisterServer, RegisterPendingWorker, RegisterSQSConsumer, RegisterOutboxPublisher),
 )
 
 func newLogger(cfg config.Config) *slog.Logger {

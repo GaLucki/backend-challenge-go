@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"math"
 	"strings"
 
 	"github.com/junglegaming/backend-challenge-go/internal/domain/money"
@@ -99,6 +100,9 @@ func (w *Wallet) Credit(amount money.Money) error {
 		return err
 	}
 
+	if w.version == math.MaxInt64 {
+		return ErrVersionOverflow
+	}
 	w.balance = next
 	w.version++
 	return nil
@@ -125,6 +129,9 @@ func (w *Wallet) Debit(amount money.Money) error {
 		return ErrInsufficientFunds
 	}
 
+	if w.version == math.MaxInt64 {
+		return ErrVersionOverflow
+	}
 	w.balance = next
 	w.version++
 	return nil
