@@ -1,19 +1,34 @@
 package httpadapter
 
 import (
+	"context"
 	"net/http"
 	"sync/atomic"
+	"time"
+
+	"github.com/junglegaming/backend-challenge-go/internal/config"
 )
+
+// DatabasePinger checks PostgreSQL availability for readiness probes.
+type DatabasePinger interface {
+	Ping(ctx context.Context) error
+}
 
 // HealthHandler exposes liveness and readiness probes.
 type HealthHandler struct {
-	ready *atomic.Bool
+	ready         *atomic.Bool
+	db            DatabasePinger
+	healthTimeout time.Duration
 }
 
-// NewHealthHandler creates a health handler. Readiness becomes true after
-// the HTTP server lifecycle reports a successful start.
-func NewHealthHandler(ready *atomic.Bool) *HealthHandler {
-	return &HealthHandler{ready: ready}
+// NewHealthHandler creates a health handler.
+// Readiness requires application initialization and a successful database ping.
+func NewHealthHandler(ready *atomic.Bool, db DatabasePinger, cfg config.Config) *HealthHandler {
+	return &HealthHandler{
+		ready:         ready,
+		db:            db,
+		healthTimeout: cfg.DBHealthTimeout,
+	}
 }
 
 type healthResponse struct {
@@ -26,10 +41,27 @@ func (h *HealthHandler) Live(w http.ResponseWriter, _ *http.Request) {
 }
 
 // Ready handles GET /health/ready.
-// In phase 0 this only confirms the application finished initialization.
-func (h *HealthHandler) Ready(w http.ResponseWriter, _ *http.Request) {
+func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 	if h.ready == nil || !h.ready.Load() {
-		WriteJSON(w, http.StatusServiceUnavailable, healthResponse{Status: "not_ready"})
+		WriteError(w, http.StatusServiceUnavailable, ErrorCodeNotReady, "application not ready")
+		return
+	}
+
+	if h.db == nil {
+		WriteError(w, http.StatusServiceUnavailable, ErrorCodeNotReady, "database unavailable")
+		return
+	}
+
+	timeout := h.healthTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	if err := h.db.Ping(ctx); err != nil {
+		WriteError(w, http.StatusServiceUnavailable, ErrorCodeNotReady, "database unavailable")
 		return
 	}
 

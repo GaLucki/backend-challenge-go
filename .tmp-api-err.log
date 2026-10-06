@@ -1,0 +1,32 @@
+[Fx] PROVIDE	fx.Lifecycle <= go.uber.org/fx.New.func1()
+[Fx] PROVIDE	fx.Shutdowner <= go.uber.org/fx.(*App).shutdowner-fm()
+[Fx] PROVIDE	fx.DotGraph <= go.uber.org/fx.(*App).dotGraph-fm()
+[Fx] PROVIDE	config.Config <= github.com/junglegaming/backend-challenge-go/internal/config.Load()
+[Fx] PROVIDE	*slog.Logger <= github.com/junglegaming/backend-challenge-go/internal/application.newLogger()
+[Fx] PROVIDE	*atomic.Bool <= github.com/junglegaming/backend-challenge-go/internal/application.newReadyFlag()
+[Fx] PROVIDE	*pgxpool.Pool <= github.com/junglegaming/backend-challenge-go/internal/adapter/postgres.NewPool()
+[Fx] PROVIDE	httpadapter.DatabasePinger <= github.com/junglegaming/backend-challenge-go/internal/application.init.func1()
+[Fx] PROVIDE	*httpadapter.HealthHandler <= github.com/junglegaming/backend-challenge-go/internal/adapter/http.NewHealthHandler()
+[Fx] PROVIDE	http.Handler <= github.com/junglegaming/backend-challenge-go/internal/adapter/http.NewHandler()
+[Fx] INVOKE		github.com/junglegaming/backend-challenge-go/internal/adapter/http.RegisterServer()
+[Fx] BEFORE RUN	provide: go.uber.org/fx.New.func1()
+[Fx] RUN	provide: go.uber.org/fx.New.func1() in 0s
+[Fx] BEFORE RUN	provide: github.com/junglegaming/backend-challenge-go/internal/config.Load()
+[Fx] RUN	provide: github.com/junglegaming/backend-challenge-go/internal/config.Load() in 0s
+[Fx] BEFORE RUN	provide: github.com/junglegaming/backend-challenge-go/internal/application.newLogger()
+[Fx] RUN	provide: github.com/junglegaming/backend-challenge-go/internal/application.newLogger() in 0s
+[Fx] BEFORE RUN	provide: github.com/junglegaming/backend-challenge-go/internal/application.newReadyFlag()
+[Fx] RUN	provide: github.com/junglegaming/backend-challenge-go/internal/application.newReadyFlag() in 0s
+[Fx] BEFORE RUN	provide: github.com/junglegaming/backend-challenge-go/internal/adapter/postgres.NewPool()
+[Fx] RUN	provide: github.com/junglegaming/backend-challenge-go/internal/adapter/postgres.NewPool() in 5.3933ms
+[Fx] BEFORE RUN	provide: github.com/junglegaming/backend-challenge-go/internal/application.init.func1()
+[Fx] RUN	provide: github.com/junglegaming/backend-challenge-go/internal/application.init.func1() in 0s
+[Fx] BEFORE RUN	provide: github.com/junglegaming/backend-challenge-go/internal/adapter/http.NewHealthHandler()
+[Fx] RUN	provide: github.com/junglegaming/backend-challenge-go/internal/adapter/http.NewHealthHandler() in 0s
+[Fx] BEFORE RUN	provide: github.com/junglegaming/backend-challenge-go/internal/adapter/http.NewHandler()
+[Fx] RUN	provide: github.com/junglegaming/backend-challenge-go/internal/adapter/http.NewHandler() in 0s
+[Fx] HOOK OnStart		github.com/junglegaming/backend-challenge-go/internal/adapter/postgres.NewPool.func1() executing (caller: github.com/junglegaming/backend-challenge-go/internal/adapter/postgres.NewPool)
+[Fx] HOOK OnStart		github.com/junglegaming/backend-challenge-go/internal/adapter/postgres.NewPool.func1() called by github.com/junglegaming/backend-challenge-go/internal/adapter/postgres.NewPool ran successfully in 43.3154ms
+[Fx] HOOK OnStart		github.com/junglegaming/backend-challenge-go/internal/adapter/http.RegisterServer.func1() executing (caller: github.com/junglegaming/backend-challenge-go/internal/adapter/http.RegisterServer)
+[Fx] HOOK OnStart		github.com/junglegaming/backend-challenge-go/internal/adapter/http.RegisterServer.func1() called by github.com/junglegaming/backend-challenge-go/internal/adapter/http.RegisterServer ran successfully in 1.085ms
+[Fx] RUNNING

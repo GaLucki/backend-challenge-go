@@ -11,6 +11,7 @@ func TestFxAppConstructs(t *testing.T) {
 	t.Setenv("APP_ENV", "test")
 	t.Setenv("HTTP_PORT", "18080")
 	t.Setenv("LOG_LEVEL", "info")
+	t.Setenv("DATABASE_URL", "postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable")
 
 	err := fx.ValidateApp(
 		fx.NopLogger,

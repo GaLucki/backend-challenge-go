@@ -1,3 +1,4 @@
-{"time":"2026-10-05T18:33:37.8655413-03:00","level":"INFO","msg":"http server starting","addr":":18081","appEnv":"development"}
-{"time":"2026-10-05T18:33:38.0746431-03:00","level":"INFO","msg":"http request completed","correlationId":"41ac1f299e2596ef12fc6dc430d8e92b","method":"GET","path":"/health/live","durationMs":0}
-{"time":"2026-10-05T18:33:38.1946566-03:00","level":"INFO","msg":"http request completed","correlationId":"bb410a87a5d9b1566bf0e09a07b0c27d","method":"GET","path":"/health/ready","durationMs":0}
+{"time":"2026-10-06T18:54:50.0929695-03:00","level":"INFO","msg":"postgres pool ready","maxConns":10,"minConns":1}
+{"time":"2026-10-06T18:54:50.1102446-03:00","level":"INFO","msg":"http server starting","addr":":18083","appEnv":"development"}
+{"time":"2026-10-06T18:54:50.7490891-03:00","level":"INFO","msg":"http request completed","correlationId":"0936311b1e265549446b4f3da365c9d8","method":"GET","path":"/health/ready","durationMs":1}
+{"time":"2026-10-06T18:54:53.2855966-03:00","level":"INFO","msg":"http request completed","correlationId":"07aff47f597ac39fc31ecfb1ee324d81","method":"GET","path":"/health/ready","durationMs":2}

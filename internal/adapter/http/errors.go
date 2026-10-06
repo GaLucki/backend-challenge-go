@@ -11,6 +11,7 @@ type ErrorCode string
 const (
 	ErrorCodeInternal ErrorCode = "INTERNAL_ERROR"
 	ErrorCodeNotFound ErrorCode = "NOT_FOUND"
+	ErrorCodeNotReady ErrorCode = "NOT_READY"
 )
 
 // APIError is the standard error payload returned by the HTTP API.
