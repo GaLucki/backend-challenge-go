@@ -12,7 +12,9 @@ storage and a SQL Unit of Work. Phase 4 implements CreateWallet, internal OPENIN
 durable HTTP idempotency and outbox event creation. Phase 5 adds REFUND/ROLLBACK and a persistent
 pending-reference worker. Phase 6 adds the incoming SQS FIFO transport, transactional Inbox,
 LocalStack provisioning and crash recovery. Phase 7 publishes committed Outbox envelopes through
-durable leases to a separate events FIFO. OIDC and wagering HTTP APIs remain for later phases.
+durable leases to a separate events FIFO. Phase 8 adds Keycloak OIDC access-token
+validation, typed identities and application-level provider/internal authorization.
+Final wagering HTTP APIs remain for a later phase.
 
 ## Package structure
 
@@ -24,6 +26,10 @@ durable leases to a separate events FIFO. OIDC and wagering HTTP APIs remain for
 | `internal/application/financial` | Transport-independent financial use cases, results, errors, canonical hash and event envelopes |
 | `internal/application/pending_worker.go` | Financial policy/worker construction and Fx lifecycle hooks |
 | `internal/adapter/http` | HTTP server, health endpoints, error envelope, middleware |
+| `internal/adapter/oidc` | OIDC discovery, RS256 access-token verification and shared JWKS cache |
+| `internal/identity` | Typed Principal, context, authenticator port and reusable authorization policy |
+| `internal/application/financial/authorized.go` | Authenticated financial facade, provider isolation and scoped HTTP idempotency |
+| `infra/keycloak` | Automatic local realm, roles, clients and service-account provisioning |
 | `internal/adapter/postgres` | pgxpool lifecycle, SQL repositories, row mappings and Unit of Work |
 | `internal/adapter/sqs` | Versioned incoming envelope, AWS SDK v2 client, FIFO lanes and commit-before-delete consumer |
 | `internal/application/sqs_consumer.go` | SQS startup validation, polling and drain through Fx |
@@ -164,8 +170,8 @@ Readiness failure response:
 
 ## Local PostgreSQL with Docker Compose
 
-Phase 1 compose stack includes **only** PostgreSQL. Keycloak, LocalStack, SQS, and the app
-container will be added later.
+Phase 1 initially included only PostgreSQL. The current Compose also provisions
+LocalStack/SQS and Keycloak (see phase 8 below); the backend runs on the host.
 
 ```sh
 docker compose --env-file .env.example config
@@ -461,8 +467,8 @@ BETs, 50 concurrent identical requests, external duplicates with different keys,
 wallet B while wallet A is demonstrably waiting for a row lock. Trigger-injected failures in
 outbox insertion or idempotency completion verify total rollback, including an earlier event insert.
 
-SQS, LocalStack, DLQ, publishers, OIDC, reconciliation, metrics/tracing and financial HTTP
-endpoints remain outside the implemented phases.
+At the end of phase 4, SQS, LocalStack, DLQ, publishers, OIDC and financial HTTP
+endpoints were still outside scope. Subsequent sections document the later phases.
 
 ## Reversals and pending references (phase 5)
 
@@ -612,8 +618,8 @@ despite later wallet changes. Replays concurrent with resolution see the committ
 after it. Failed worker transactions leave both transaction and saved result pending. Non-HTTP pendings
 have no idempotency record and resolve using the same logic.
 
-Keycloak/OIDC, financial HTTP endpoints, reconciliation, advanced metrics and
-tracing remain unimplemented.
+At the end of phase 5, Keycloak/OIDC was still pending (implemented in phase 8 below).
+Final financial HTTP endpoints, reconciliation, advanced metrics and tracing remain pending.
 
 ## Phase 6: incoming SQS FIFO
 
@@ -927,6 +933,135 @@ long sleeps, without replacing the database or broker with mocks.
 Operations: [PHASE7_OPERATIONS.md](PHASE7_OPERATIONS.md).
 Protocol references: [PostgreSQL SKIP LOCKED](https://www.postgresql.org/docs/16/sql-select.html),
 [SQS FIFO identity/deduplication](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/FIFO-key-terms.html).
+
+## Phase 8: OAuth2/OIDC and authenticated financial access
+
+Compose provisions pinned Keycloak **26.7.5**, realm `jungle-gaming`, provider-a,
+provider-b and internal-service confidential clients, service accounts, two realm
+roles and signed access-token mappers. `wagering-api` is a bearer-only resource
+client/audience, not a caller. Service account role assignments are restricted by
+client scope mappings; interactive login and password/implicit grants are disabled
+for the callers. All three clients use OAuth2 `client_credentials`. Local secrets
+are explicitly development fixtures, not backend verification secrets. Keycloak's
+embedded H2 database is separate from financial PostgreSQL. Host ports 8081 (OIDC)
+and 9090 (health management) bind to loopback. Development configuration is not a
+production IdP deployment; production needs TLS, durable IdP storage and secrets.
+
+### Authentication and lifecycle
+
+`internal/adapter/oidc.Verifier` uses **coreos/go-oidc v3.21.0**, discovering the
+issuer and JWKS URI over the configured HTTP client with bounded timeout. The
+shared library verifier/cache checks exact issuer, configured audience, RS256
+algorithm, cryptographic signature, expiry and `nbf`. The adapter further requires
+an access token (`typ=Bearer`), nonempty typed `sub`/`azp`, expiry strictly later
+than now, and `nbf <= now` (the library otherwise allows five minutes of skew).
+Unknown keys and `alg=none` are rejected. Provider-role tokens require a valid
+`provider_id`; ambiguous provider+internal identities are rejected. Claims are
+parsed centrally **after** signature verification; authorization is a separate
+policy. Missing roles yield a valid but unprivileged principal, not authorization.
+
+The backend never embeds verification keys or needs caller/admin secrets. JWKS
+is cached and shared between requests; a new key causes a remote refresh. The
+library handles concurrent access/refresh. Known cached keys can still verify
+valid unexpired tokens during IdP outage; an unknown key without a successful
+refresh cannot authenticate. Public-key removal/revocation is not an immediate
+per-request introspection check; short local access-token lifetimes bound stale
+tokens. Operational key revocation requires deployment policy outside this phase.
+
+Fx constructs an `identity.Authenticator`, `identity.Authorizer`, HTTP middleware
+and authenticated financial facade without globals. Discovery runs as an OnStart
+dependency before the HTTP listener. An enabled IdP that cannot be discovered, or
+whose issuer does not match, prevents startup and rolls back initialized resources.
+Runtime readiness continues to check initialization and PostgreSQL; it does not
+perform IdP I/O for every health probe. Liveness remains independent of the IdP.
+`OIDC_ENABLED=false` skips discovery but **never grants access** to protected
+routes: authentication fails closed with `401`. The .env example enables OIDC.
+`OIDC_AUDIENCE` defaults to `wagering-api`; an explicitly empty value disables only
+the audience comparison. Issuer/signature/expiry validation remain mandatory.
+Issuer HTTP is allowed only for development/test configuration; other environments
+require HTTPS. Legacy `KEYCLOAK_URL` is not used for authentication.
+
+HTTP requires exactly one Authorization value with a Bearer scheme (case
+insensitive), one space and a nonempty credential. Multiple headers, comma-joined
+credentials, other schemes, empty credentials and malformed tokens return `401`
+with `WWW-Authenticate: Bearer`. Successful authentication places a copied typed
+`identity.Principal` in request context: Subject, ClientID, ProviderID, Roles and
+Internal. Responses/logs do not print raw tokens, credentials, JWT/library error
+details or all claims. Correlation middleware and the existing error envelope
+remain in use. Valid identities lacking permission receive `403`.
+
+### Application authorization, provider mapping and replay isolation
+
+Provider identity comes exclusively from the signed `provider_id` claim, set by
+an IdP-controlled hardcoded mapper independently for each caller. Subject and azp
+identify the actual service account/client; they are not request fields. Roles
+come from signed `realm_access.roles`. A client cannot change these claims by
+supplying body/query/path/custom-header values or requesting a different scope.
+
+`identity.Authorizer` centralizes RequireProvider, RequireInternal and
+AuthorizeProvider. `financial.AuthorizedService` repeats the appropriate checks
+at the use-case boundary, even when a handler applies no ownership middleware:
+
+| Operation | Provider identity | Internal identity |
+| --- | --- | --- |
+| ProcessHTTPWager | Own provider only; derive empty ProviderID from principal; mismatch forbidden | Forbidden (no provider impersonation) |
+| GetTransaction / GetByExternalID | Own transactions only | May read any explicitly selected provider and internal OPENING |
+| CreateWallet / OPENING | Forbidden | Allowed |
+| GetWallet | Forbidden | Allowed |
+
+Wallet ownership is by player, not provider. This phase keeps unscoped wallet
+reads internal-only rather than inventing an authorization relationship. A future
+player/provider wallet policy and reconciliation permissions require a later phase.
+Cross-provider lookups consistently return Forbidden for an existing foreign
+transaction or explicit provider mismatch; missing transaction IDs are NotFound.
+This deliberately permits existence inference for a known ID, but returns no
+financial row/details when access is denied. Explicit mismatch is rejected before
+querying storage, including replay attempts.
+
+The authenticated facade scopes HTTP idempotency with
+`oidc:v1:` + SHA-256(JSON([authenticated provider ID, caller key])). Structured
+encoding avoids separator ambiguity. Hashing is deterministic and the existing
+repository still persists the key/result in the same financial transaction. The
+canonical payload includes the derived provider ID. A and B may use the same key
+and external ID without sharing replay state; same-provider changed payloads
+continue to conflict. No schema/migration change or historical-record rewrite is
+needed: there was no public financial HTTP API in earlier phases. The prior raw
+core API remains for trusted application adapters; future HTTP adapters must call
+the authorized facade. The namespace is an adaptation of the earlier global key
+contract at the external identity boundary, not a change to financial processing.
+
+SQS is a separate internal broker-authenticated channel. Its providerId remains
+business data; broker credentials/policies authorize producers and consumers.
+There are no OAuth Bearer tokens in SQS payloads. The existing financial Service,
+consumer, Inbox, pending worker and Outbox publisher remain unchanged. LocalStack
+test/test credentials do not claim to simulate production IAM enforcement.
+
+### Scope and evidence
+
+Only `GET /auth/me`, `/auth/providers/{providerId}` and `/auth/internal` probes are
+added to the production router; both health endpoints stay public. Final financial
+HTTP endpoints, reconciliation, tracing, final metrics and final audit remain out
+of this phase. Test-only `/test/*` routes exercise authorized financial reads and
+body spoofing; they are compiled only as tests, not registered in the application.
+
+Unit tests verify malformed Bearer, claims/signatures/algorithms, strict nbf,
+issuer/audience, Principal/context, role policy, 401/403, fail-closed disabled
+verification, JWKS cache reuse and key rotation/outage. Integration obtains
+all three tokens from **real Keycloak** using client_credentials, validates real
+discovery/JWKS and health, tests internal access and invalid credentials, and uses
+the token's real expiry with an injected clock for deterministic expiration.
+Incorrect expected issuer/audience reject an otherwise valid real token.
+PostgreSQL+Keycloak+Fx tests prove A/B reads, bidirectional denial, body spoofing,
+separate saved replays and no extra wallet/ledger/outbox effects. Disposable
+schemas apply all five existing migrations. A startup failure test proves that
+HTTP cannot listen when discovery fails. Existing financial/SQS/outbox recovery
+tests are retained and rerun against real PostgreSQL/LocalStack.
+
+Operation commands and local secrets: [PHASE8_OPERATIONS.md](PHASE8_OPERATIONS.md).
+Validation and exact file inventory: [PHASE8_REPORT.md](PHASE8_REPORT.md).
+References: [Keycloak service accounts](https://www.keycloak.org/docs/latest/server_admin/index.html#_service_accounts),
+[Keycloak 26.7.5](https://www.keycloak.org/2026/09/keycloak-2675-released),
+[go-oidc verifier and JWKS implementation](https://github.com/coreos/go-oidc).
 
 ## Testing notes
 

@@ -9,9 +9,11 @@ import (
 type ErrorCode string
 
 const (
-	ErrorCodeInternal ErrorCode = "INTERNAL_ERROR"
-	ErrorCodeNotFound ErrorCode = "NOT_FOUND"
-	ErrorCodeNotReady ErrorCode = "NOT_READY"
+	ErrorCodeInternal     ErrorCode = "INTERNAL_ERROR"
+	ErrorCodeNotFound     ErrorCode = "NOT_FOUND"
+	ErrorCodeNotReady     ErrorCode = "NOT_READY"
+	ErrorCodeUnauthorized ErrorCode = "UNAUTHORIZED"
+	ErrorCodeForbidden    ErrorCode = "FORBIDDEN"
 )
 
 // APIError is the standard error payload returned by the HTTP API.

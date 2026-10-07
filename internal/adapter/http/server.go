@@ -66,10 +66,13 @@ func RegisterServer(p ServerParams) {
 }
 
 // NewHandler builds the root HTTP handler with middleware and routes.
-func NewHandler(health *HealthHandler, logger *slog.Logger) http.Handler {
+func NewHandler(health *HealthHandler, logger *slog.Logger, auth *AuthMiddleware) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", health.Live)
 	mux.HandleFunc("GET /health/ready", health.Ready)
+	mux.Handle("GET /auth/me", auth.Authenticate(http.HandlerFunc(ProbeHandler)))
+	mux.Handle("GET /auth/internal", auth.Authenticate(auth.RequireInternal(http.HandlerFunc(ProbeHandler))))
+	mux.Handle("GET /auth/providers/{providerId}", auth.Authenticate(auth.AuthorizeProvider(func(r *http.Request) string { return r.PathValue("providerId") }, http.HandlerFunc(ProbeHandler))))
 
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, pattern := mux.Handler(r); pattern == "" {

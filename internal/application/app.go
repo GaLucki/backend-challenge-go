@@ -6,8 +6,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	httpadapter "github.com/junglegaming/backend-challenge-go/internal/adapter/http"
+	oidcadapter "github.com/junglegaming/backend-challenge-go/internal/adapter/oidc"
 	"github.com/junglegaming/backend-challenge-go/internal/adapter/postgres"
+	"github.com/junglegaming/backend-challenge-go/internal/application/financial"
 	"github.com/junglegaming/backend-challenge-go/internal/config"
+	"github.com/junglegaming/backend-challenge-go/internal/identity"
 	"github.com/junglegaming/backend-challenge-go/internal/observability"
 	"github.com/junglegaming/backend-challenge-go/internal/ports"
 	"go.uber.org/fx"
@@ -25,6 +28,10 @@ var Module = fx.Options(
 		postgres.NewPublicationStore,
 		newFinancialService,
 		newPendingWorker,
+		identity.NewAuthorizer,
+		newOIDCVerifier,
+		financial.NewAuthorizedService,
+		httpadapter.NewAuthMiddleware,
 		func(r ports.Repositories) ports.ReversalRepository { return r.Reversals },
 		func(r ports.Repositories) ports.PendingReferenceRepository { return r.PendingReferences },
 		func(r ports.Repositories) ports.IdempotencyRepository { return r.Idempotency },
@@ -39,6 +46,15 @@ var Module = fx.Options(
 	),
 	fx.Invoke(httpadapter.RegisterServer, RegisterPendingWorker, RegisterSQSConsumer, RegisterOutboxPublisher),
 )
+
+func newOIDCVerifier(lc fx.Lifecycle, cfg config.Config) (identity.Authenticator, error) {
+	v, err := oidcadapter.NewVerifier(cfg)
+	if err != nil {
+		return nil, err
+	}
+	lc.Append(fx.Hook{OnStart: v.Initialize})
+	return v, nil
+}
 
 func newLogger(cfg config.Config) *slog.Logger {
 	return observability.NewLogger(cfg.LogLevel)

@@ -1,0 +1,63 @@
+{
+  "realm": "jungle-gaming",
+  "enabled": true,
+  "displayName": "Jungle Gaming - local development",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "accessTokenLifespan": 60,
+  "defaultSignatureAlgorithm": "RS256",
+  "defaultDefaultClientScopes": [],
+  "defaultOptionalClientScopes": [],
+  "roles": { "realm": [{ "name": "provider" }, { "name": "internal" }] },
+  "scopeMappings": [
+    { "client": "provider-a", "roles": ["provider"] },
+    { "client": "provider-b", "roles": ["provider"] },
+    { "client": "internal-service", "roles": ["internal"] }
+  ],
+  "clients": [
+    {
+      "clientId": "wagering-api", "enabled": true, "protocol": "openid-connect", "bearerOnly": true
+    },
+    {
+      "clientId": "provider-a", "enabled": true, "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret", "secret": "local-dev-provider-a-secret",
+      "publicClient": false, "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false, "directAccessGrantsEnabled": false, "implicitFlowEnabled": false,
+      "fullScopeAllowed": false, "defaultClientScopes": [], "optionalClientScopes": [],
+      "protocolMappers": [
+        { "name": "provider-id", "protocol": "openid-connect", "protocolMapper": "oidc-hardcoded-claim-mapper", "config": { "claim.name": "provider_id", "claim.value": "provider-a", "jsonType.label": "String", "access.token.claim": "true", "id.token.claim": "false" } },
+        { "name": "api-audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper", "config": { "included.client.audience": "wagering-api", "access.token.claim": "true", "id.token.claim": "false" } },
+        { "name": "realm-roles", "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-realm-role-mapper", "config": { "claim.name": "realm_access.roles", "multivalued": "true", "jsonType.label": "String", "access.token.claim": "true", "id.token.claim": "false" } }
+      ]
+    },
+    {
+      "clientId": "provider-b", "enabled": true, "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret", "secret": "local-dev-provider-b-secret",
+      "publicClient": false, "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false, "directAccessGrantsEnabled": false, "implicitFlowEnabled": false,
+      "fullScopeAllowed": false, "defaultClientScopes": [], "optionalClientScopes": [],
+      "protocolMappers": [
+        { "name": "provider-id", "protocol": "openid-connect", "protocolMapper": "oidc-hardcoded-claim-mapper", "config": { "claim.name": "provider_id", "claim.value": "provider-b", "jsonType.label": "String", "access.token.claim": "true", "id.token.claim": "false" } },
+        { "name": "api-audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper", "config": { "included.client.audience": "wagering-api", "access.token.claim": "true", "id.token.claim": "false" } },
+        { "name": "realm-roles", "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-realm-role-mapper", "config": { "claim.name": "realm_access.roles", "multivalued": "true", "jsonType.label": "String", "access.token.claim": "true", "id.token.claim": "false" } }
+      ]
+    },
+    {
+      "clientId": "internal-service", "enabled": true, "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret", "secret": "local-dev-internal-service-secret",
+      "publicClient": false, "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false, "directAccessGrantsEnabled": false, "implicitFlowEnabled": false,
+      "fullScopeAllowed": false, "defaultClientScopes": [], "optionalClientScopes": [],
+      "protocolMappers": [
+        { "name": "api-audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper", "config": { "included.client.audience": "wagering-api", "access.token.claim": "true", "id.token.claim": "false" } },
+        { "name": "realm-roles", "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-realm-role-mapper", "config": { "claim.name": "realm_access.roles", "multivalued": "true", "jsonType.label": "String", "access.token.claim": "true", "id.token.claim": "false" } }
+      ]
+    }
+  ],
+  "users": [
+    { "username": "service-account-provider-a", "enabled": true, "serviceAccountClientId": "provider-a", "realmRoles": ["provider"] },
+    { "username": "service-account-provider-b", "enabled": true, "serviceAccountClientId": "provider-b", "realmRoles": ["provider"] },
+    { "username": "service-account-internal-service", "enabled": true, "serviceAccountClientId": "internal-service", "realmRoles": ["internal"] }
+  ]
+}

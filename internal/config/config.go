@@ -23,7 +23,6 @@ const (
 )
 
 // Config holds application configuration loaded from environment variables.
-// Fields reserved for later phases are loaded when present but are not validated yet.
 type Config struct {
 	AppEnv          string
 	HTTPPort        string
@@ -44,7 +43,7 @@ type Config struct {
 	PendingTTL          time.Duration
 	PendingBatchSize    int32
 
-	// Reserved for later phases.
+	// KeycloakURL is retained for legacy config compatibility; OIDC uses OIDCIssuerURL.
 	KeycloakURL                                                   string
 	SQSEndpoint                                                   string
 	AWSRegion                                                     string
@@ -66,6 +65,9 @@ type Config struct {
 	OutboxBatchSize                                               int32
 	OutboxPollInterval, OutboxBaseRetryDelay, OutboxMaxRetryDelay time.Duration
 	OutboxClaimDuration, OutboxPublishTimeout, OutboxStoreTimeout time.Duration
+	OIDCEnabled                                                   bool
+	OIDCIssuerURL, OIDCAudience                                   string
+	OIDCHTTPTimeout                                               time.Duration
 }
 
 // Load reads configuration from environment variables and validates required fields.
@@ -102,6 +104,9 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	if err = cfg.loadOIDC(); err != nil {
+		return Config{}, err
+	}
 	if err = cfg.loadOutbox(); err != nil {
 		return Config{}, err
 	}
@@ -232,6 +237,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateOutbox(); err != nil {
+		return err
+	}
+	if err := c.ValidateOIDC(); err != nil {
 		return err
 	}
 

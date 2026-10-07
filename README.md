@@ -2,6 +2,14 @@
 
 Implemente um serviço em **Go**, com **Uber Fx**, para processar operações financeiras de provedores de jogos em um ambiente distribuído.
 
+Implementação concluída até a **fase 8**. Para subir PostgreSQL, LocalStack e
+Keycloak com realm e clients automáticos, obter tokens `client_credentials` de
+`provider-a`, `provider-b` e `internal-service` e executar integração real, veja
+[operação da fase 8](docs/PHASE8_OPERATIONS.md). As decisões estão em
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) e a validação em
+[relatório da fase 8](docs/PHASE8_REPORT.md). A API financeira HTTP final permanece
+para a próxima fase; os probes de autenticação estão disponíveis em `/auth/*`.
+
 ## 1. Objetivo
 
 A aplicação deve oferecer uma API HTTP e um consumidor de mensagens que movimentem carteiras de jogadores com garantias equivalentes. Demonstre que o resultado financeiro continua correto com várias instâncias em execução e falhas entre as etapas do processamento.
