@@ -169,7 +169,7 @@ func TestRollbackLOSSHasPersistedRejection(t *testing.T) {
 	s, u := unitService()
 	w := createUnitWallet(t, s, 10000)
 	runUnitWager(t, s, input(t, w.WalletID, wager.TypeLoss, 0))
-	result := runUnitWager(t, s, reversalInput(t, w.WalletID, wager.TypeRollback, 0, "rollback", "external"))
+	result := runUnitWager(t, s, reversalInput(t, w.WalletID, wager.TypeRollback, 1, "rollback", "external"))
 	if result.State != wager.StateRejected || result.FailureCode != FailureReferenceTypeInvalid || u.state.wallets[w.WalletID].Version() != 1 {
 		t.Fatal(result)
 	}

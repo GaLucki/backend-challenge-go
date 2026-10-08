@@ -52,7 +52,32 @@ func (p PendingPolicy) backoff(attempt int32) time.Duration {
 
 // ResolvePendingOnce claims one due row and resolves it within one SQL transaction.
 // The supplied UTC instant allows deterministic batches/tests without scheduler sleeps.
-func (s *Service) ResolvePendingOnce(ctx context.Context, now time.Time) (bool, error) {
+func (s *Service) ResolvePendingOnce(ctx context.Context, now time.Time) (handledResult bool, resultErr error) {
+	started := time.Now()
+	var observed WagerResult
+	var action, correlation string
+	var retryCount int32
+	defer func() {
+		t := s.telemetry()
+		t.Duration("pending_processing_duration_seconds", time.Since(started))
+		if resultErr != nil {
+			t.Count("pending_events_total", "error")
+			if errors.Is(resultErr, ErrPersistence) {
+				t.Count("dependency_failures_total", "postgres", "pending")
+			}
+			return
+		}
+		if !handledResult {
+			return
+		}
+		t.Count("pending_events_total", action)
+		if action == "resolved" {
+			t.Count("financial_movements_total", string(observed.Type))
+		}
+		if s.logger != nil {
+			s.logger.InfoContext(ctx, "pending reference attempt completed", "correlationId", correlation, "transactionId", observed.TransactionID, "walletId", observed.WalletID, "providerId", observed.ProviderID, "operationType", observed.Type, "status", observed.State, "outcome", action, "retryCount", retryCount, "durationMs", time.Since(started).Milliseconds())
+		}
+	}()
 	now = now.UTC().Truncate(time.Microsecond)
 	handled := false
 	err := s.uow.WithinTransaction(ctx, func(r ports.Repositories) error {
@@ -64,6 +89,8 @@ func (s *Service) ResolvePendingOnce(ctx context.Context, now time.Time) (bool, 
 			return err
 		}
 		handled = true
+		correlation = pending.CorrelationID
+		retryCount = pending.AttemptCount
 		tx, err := r.Wagers.Get(ctx, pending.TransactionID)
 		if err != nil {
 			return err
@@ -71,6 +98,7 @@ func (s *Service) ResolvePendingOnce(ctx context.Context, now time.Time) (bool, 
 		if tx.State() != wager.StatePendingReference {
 			return ErrPersistence
 		}
+		observed = WagerResult{TransactionID: tx.ID(), WalletID: wallet.ID(tx.WalletID()), ProviderID: tx.ProviderID(), Type: tx.Type(), State: tx.State()}
 		w, err := r.Wallets.GetForUpdate(ctx, wallet.ID(tx.WalletID()))
 		if err != nil {
 			return err
@@ -80,9 +108,11 @@ func (s *Service) ResolvePendingOnce(ctx context.Context, now time.Time) (bool, 
 		var direction ports.LedgerDirection
 		var changed, missing bool
 		if !now.Before(pending.ExpiresAt) || pending.AttemptCount >= pending.MaxAttempts {
+			action = "expired"
 			err = tx.MarkRejected(FailureReferenceNotFound, now)
 		} else {
 			pending.AttemptCount++
+			retryCount = pending.AttemptCount
 			direction, changed, missing, err = s.applyReversal(ctx, r, &tx, &w, now)
 		}
 		if err != nil {
@@ -90,10 +120,12 @@ func (s *Service) ResolvePendingOnce(ctx context.Context, now time.Time) (bool, 
 		}
 		if missing {
 			if pending.AttemptCount >= pending.MaxAttempts {
+				action = "expired"
 				if err = tx.MarkRejected(FailureReferenceNotFound, now); err != nil {
 					return err
 				}
 			} else {
+				action = "retry"
 				pending.NextAttemptAt = now.Add(s.pendingPolicy.backoff(pending.AttemptCount))
 				if pending.NextAttemptAt.After(pending.ExpiresAt) {
 					pending.NextAttemptAt = pending.ExpiresAt
@@ -105,6 +137,13 @@ func (s *Service) ResolvePendingOnce(ctx context.Context, now time.Time) (bool, 
 		result, err := finishReversal(ctx, r, tx, w, before, version, direction, changed, pending.CorrelationID, wager.StatePendingReference)
 		if err != nil {
 			return err
+		}
+		observed = result
+		if action != "expired" {
+			action = "rejected"
+			if changed {
+				action = "resolved"
+			}
 		}
 		payload, err := json.Marshal(result)
 		if err != nil {

@@ -42,7 +42,7 @@ func isolatedPublisherDatabase(t *testing.T) string {
 	if _, err := connection.Exec(ctx, "SET search_path TO "+quoted); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"000001_app_metadata.up.sql", "000002_financial_persistence.up.sql", "000003_wager_idempotency.up.sql", "000004_reversals_pending_references.up.sql", "000005_outbox_publication_leases.up.sql"} {
+	for _, name := range []string{"000001_app_metadata.up.sql", "000002_financial_persistence.up.sql", "000003_wager_idempotency.up.sql", "000004_reversals_pending_references.up.sql", "000005_outbox_publication_leases.up.sql", "000006_final_contract_metadata.up.sql"} {
 		contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
 		if err != nil {
 			t.Fatal(err)

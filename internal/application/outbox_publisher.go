@@ -11,11 +11,12 @@ import (
 	sqsadapter "github.com/junglegaming/backend-challenge-go/internal/adapter/sqs"
 	"github.com/junglegaming/backend-challenge-go/internal/application/outbox"
 	"github.com/junglegaming/backend-challenge-go/internal/config"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
 	"github.com/junglegaming/backend-challenge-go/internal/ports"
 	"go.uber.org/fx"
 )
 
-func RegisterOutboxPublisher(lc fx.Lifecycle, cfg config.Config, store ports.PublicationStore, logger *slog.Logger) {
+func RegisterOutboxPublisher(lc fx.Lifecycle, cfg config.Config, store ports.PublicationStore, logger *slog.Logger, metrics *observability.Metrics) {
 	if !cfg.OutboxEnabled {
 		return
 	}
@@ -66,6 +67,7 @@ func RegisterOutboxPublisher(lc fx.Lifecycle, cfg config.Config, store ports.Pub
 				return err
 			}
 			poll, pollCancel := context.WithCancel(context.Background())
+			publisher.WithTelemetry(metrics)
 			work, workCancel := context.WithCancel(context.Background())
 			stopPolling, cancelWork = pollCancel, workCancel
 			go func() { defer close(done); publisher.Run(poll, work) }()

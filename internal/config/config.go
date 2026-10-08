@@ -24,10 +24,12 @@ const (
 
 // Config holds application configuration loaded from environment variables.
 type Config struct {
-	AppEnv          string
-	HTTPPort        string
-	LogLevel        string
-	ShutdownTimeout time.Duration
+	MetricsEnabled                                bool
+	MetricsCollectInterval, MetricsCollectTimeout time.Duration
+	AppEnv                                        string
+	HTTPPort                                      string
+	LogLevel                                      string
+	ShutdownTimeout                               time.Duration
 
 	DatabaseURL         string
 	DBMaxConns          int32
@@ -104,6 +106,9 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	if err = cfg.loadMetrics(); err != nil {
+		return Config{}, err
+	}
 	if err = cfg.loadOIDC(); err != nil {
 		return Config{}, err
 	}
@@ -179,6 +184,9 @@ func Load() (Config, error) {
 
 // Validate checks required configuration values.
 func (c Config) Validate() error {
+	if err := c.validateMetrics(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.AppEnv) == "" {
 		return fmt.Errorf("APP_ENV is required")
 	}
@@ -239,6 +247,23 @@ func (c Config) Validate() error {
 	if err := c.validateOutbox(); err != nil {
 		return err
 	}
+	if (c.SQSEnabled || c.OutboxEnabled) && c.AppEnv != "development" && c.AppEnv != "test" {
+		if c.AWSAccessKeyID == "test" || c.AWSSecretAccessKey == "test" {
+			return fmt.Errorf("dummy broker credentials require development/test")
+		}
+		brokerURLs := []string{c.SQSEndpoint}
+		if c.SQSEnabled {
+			brokerURLs = append(brokerURLs, c.SQSQueueURL)
+		}
+		if c.OutboxEnabled {
+			brokerURLs = append(brokerURLs, c.EventQueueURL)
+		}
+		for _, raw := range brokerURLs {
+			if raw != "" && !strings.HasPrefix(raw, "https://") {
+				return fmt.Errorf("custom broker endpoint and queue URLs require HTTPS outside development/test")
+			}
+		}
+	}
 	if err := c.ValidateOIDC(); err != nil {
 		return err
 	}
@@ -286,7 +311,7 @@ func validateDatabaseURL(raw string) error {
 
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("DATABASE_URL is invalid: %w", err)
+		return fmt.Errorf("DATABASE_URL is invalid")
 	}
 
 	switch strings.ToLower(parsed.Scheme) {
@@ -317,7 +342,7 @@ func durationEnv(key string, fallback time.Duration) (time.Duration, error) {
 
 	d, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", key, err)
+		return 0, fmt.Errorf("invalid %s", key)
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("%s must be positive", key)
@@ -333,7 +358,7 @@ func int32Env(key string, fallback int32) (int32, error) {
 
 	value, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", key, err)
+		return 0, fmt.Errorf("invalid %s", key)
 	}
 	return int32(value), nil
 }

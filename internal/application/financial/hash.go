@@ -10,6 +10,18 @@ import (
 // Identifiers are exact, case-sensitive values; no implicit trimming is applied.
 // Money is canonical integer cents and validated uppercase currency.
 func CanonicalPayloadHash(in WagerInput) string {
+	if in.GameID != "" || (in.Type == "WIN" && in.ReferenceExternalTransactionID != "") {
+		// encoding/json sorts map keys. Version 3 covers all current business
+		// fields; legacy v1/v2 records retain their original hash and replay.
+		payload := map[string]any{"version": 3, "providerId": in.ProviderID,
+			"externalTransactionId": in.ExternalTransactionID, "playerId": in.PlayerID,
+			"walletId": in.WalletID, "type": in.Type, "amountCents": in.Amount.Cents(),
+			"currency": in.Amount.Currency(), "roundId": in.RoundID, "gameId": in.GameID,
+			"referenceExternalTransactionId": in.ReferenceExternalTransactionID}
+		encoded, _ := json.Marshal(payload)
+		hash := sha256.Sum256(encoded)
+		return hex.EncodeToString(hash[:])
+	}
 	payload := struct {
 		Version                        int    `json:"version"`
 		ProviderID                     string `json:"providerId"`

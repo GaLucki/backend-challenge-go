@@ -3,6 +3,7 @@ package wallet
 import (
 	"math"
 	"strings"
+	"time"
 
 	"github.com/junglegaming/backend-challenge-go/internal/domain/money"
 )
@@ -15,11 +16,13 @@ type PlayerID string
 
 // Wallet is the financial aggregate root.
 type Wallet struct {
-	id       ID
-	playerID PlayerID
-	currency string
-	balance  money.Money
-	version  int64
+	id        ID
+	playerID  PlayerID
+	currency  string
+	balance   money.Money
+	version   int64
+	createdAt time.Time
+	updatedAt time.Time
 }
 
 // New creates a wallet with version 1 and a non-negative balance.
@@ -46,12 +49,15 @@ func New(id ID, playerID PlayerID, currency string, balance money.Money) (Wallet
 		return Wallet{}, ErrNegativeBalance
 	}
 
+	at := time.Now().UTC().Truncate(time.Microsecond)
 	return Wallet{
-		id:       id,
-		playerID: playerID,
-		currency: currency,
-		balance:  balance,
-		version:  1,
+		id:        id,
+		playerID:  playerID,
+		currency:  currency,
+		balance:   balance,
+		version:   1,
+		createdAt: at,
+		updatedAt: at,
 	}, nil
 }
 
@@ -65,8 +71,27 @@ func Rehydrate(id ID, playerID PlayerID, currency string, balance money.Money, v
 		return Wallet{}, ErrInvalidVersion
 	}
 	w.version = version
+	// Legacy callers do not supply historical timestamps. Keep them unknown
+	// rather than inventing a new creation time during rehydration.
+	w.createdAt, w.updatedAt = time.Time{}, time.Time{}
 	return w, nil
 }
+
+// RehydrateWithTimestamps restores persisted metadata without new movements.
+func RehydrateWithTimestamps(id ID, playerID PlayerID, currency string, balance money.Money, version int64, createdAt, updatedAt time.Time) (Wallet, error) {
+	w, err := Rehydrate(id, playerID, currency, balance, version)
+	if err != nil {
+		return Wallet{}, err
+	}
+	if createdAt.IsZero() || updatedAt.IsZero() || updatedAt.Before(createdAt) {
+		return Wallet{}, ErrInvalidTimestamp
+	}
+	w.createdAt, w.updatedAt = createdAt.UTC(), updatedAt.UTC()
+	return w, nil
+}
+
+func (w Wallet) CreatedAt() time.Time { return w.createdAt }
+func (w Wallet) UpdatedAt() time.Time { return w.updatedAt }
 
 // ID returns the wallet identifier.
 func (w Wallet) ID() ID { return w.id }
@@ -105,6 +130,7 @@ func (w *Wallet) Credit(amount money.Money) error {
 	}
 	w.balance = next
 	w.version++
+	w.updatedAt = time.Now().UTC().Truncate(time.Microsecond)
 	return nil
 }
 
@@ -134,5 +160,6 @@ func (w *Wallet) Debit(amount money.Money) error {
 	}
 	w.balance = next
 	w.version++
+	w.updatedAt = time.Now().UTC().Truncate(time.Microsecond)
 	return nil
 }

@@ -1,10 +1,17 @@
 package postgres
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/puddle/v2"
 	"github.com/junglegaming/backend-challenge-go/internal/config"
+	"go.uber.org/fx"
 )
 
 func TestBuildPoolConfigAppliesSettings(t *testing.T) {
@@ -51,5 +58,55 @@ func TestBuildPoolConfigRejectsInvalidURL(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for invalid DATABASE_URL")
+	}
+}
+
+type recordedPoolLifecycle struct {
+	hooks []fx.Hook
+}
+
+func (l *recordedPoolLifecycle) Append(hook fx.Hook) {
+	l.hooks = append(l.hooks, hook)
+}
+
+func TestPoolFailedStartClosesPoolAndSanitizesError(t *testing.T) {
+	lifecycle := &recordedPoolLifecycle{}
+	pool, err := NewPool(lifecycle, config.Config{
+		DatabaseURL:      "postgres://wagering:PRIVATE_PASSWORD@localhost:5432/wagering?sslmode=disable",
+		DBMaxConns:       1,
+		DBConnectTimeout: time.Second,
+	}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if len(lifecycle.hooks) != 1 {
+		t.Fatalf("expected one pool lifecycle hook, got %d", len(lifecycle.hooks))
+	}
+	err = lifecycle.hooks[0].OnStart(ctx)
+	if err == nil || strings.Contains(err.Error(), "PRIVATE_PASSWORD") {
+		t.Fatalf("expected sanitized startup failure, got %v", err)
+	}
+	// Fx does not run OnStop for a hook whose OnStart failed. A fresh context
+	// must therefore see a closed pool without invoking its OnStop hook.
+	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), time.Second)
+	defer acquireCancel()
+	conn, err := pool.Acquire(acquireCtx)
+	if conn != nil {
+		conn.Release()
+	}
+	if !errors.Is(err, puddle.ErrClosedPool) {
+		t.Fatalf("pool remained open after failed startup: %v", err)
+	}
+}
+
+func TestBuildPoolConfigDoesNotExposeCredentials(t *testing.T) {
+	_, err := BuildPoolConfig(config.Config{
+		DatabaseURL: "postgres://wagering:PRIVATE_PASSWORD@localhost:INVALID_PORT/wagering",
+	})
+	if err == nil || strings.Contains(err.Error(), "PRIVATE_PASSWORD") {
+		t.Fatalf("expected sanitized configuration error, got %v", err)
 	}
 }

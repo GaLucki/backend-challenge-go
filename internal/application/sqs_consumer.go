@@ -13,11 +13,12 @@ import (
 	sqsadapter "github.com/junglegaming/backend-challenge-go/internal/adapter/sqs"
 	"github.com/junglegaming/backend-challenge-go/internal/application/financial"
 	"github.com/junglegaming/backend-challenge-go/internal/config"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
 	"go.uber.org/fx"
 )
 
 // RegisterSQSConsumer owns polling and draining before the shared SQL pool stops.
-func RegisterSQSConsumer(lc fx.Lifecycle, cfg config.Config, service *financial.Service, logger *slog.Logger) {
+func RegisterSQSConsumer(lc fx.Lifecycle, cfg config.Config, service *financial.Service, logger *slog.Logger, metrics *observability.Metrics) {
 	if !cfg.SQSEnabled {
 		return
 	}
@@ -60,6 +61,7 @@ func RegisterSQSConsumer(lc fx.Lifecycle, cfg config.Config, service *financial.
 				return err
 			}
 			pollCtx, pollCancel := context.WithCancel(context.Background())
+			consumer.WithTelemetry(metrics)
 			workCtx, workCancel := context.WithCancel(context.Background())
 			stopPolling, cancelWork = pollCancel, workCancel
 			go func() { defer close(done); consumer.Run(pollCtx, workCtx) }()

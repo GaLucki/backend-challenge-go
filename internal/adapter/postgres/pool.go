@@ -14,7 +14,7 @@ import (
 func BuildPoolConfig(cfg config.Config) (*pgxpool.Config, error) {
 	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
+		return nil, fmt.Errorf("parse DATABASE_URL failed")
 	}
 
 	poolCfg.MaxConns = cfg.DBMaxConns
@@ -36,7 +36,7 @@ func NewPool(lc fx.Lifecycle, cfg config.Config, logger *slog.Logger) (*pgxpool.
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {
-		return nil, fmt.Errorf("create postgres pool: %w", err)
+		return nil, fmt.Errorf("create postgres pool failed")
 	}
 
 	lc.Append(fx.Hook{
@@ -45,7 +45,8 @@ func NewPool(lc fx.Lifecycle, cfg config.Config, logger *slog.Logger) (*pgxpool.
 			defer cancel()
 
 			if err := pool.Ping(pingCtx); err != nil {
-				return fmt.Errorf("postgres ping failed: %w", err)
+				pool.Close()
+				return fmt.Errorf("postgres ping failed")
 			}
 
 			logger.InfoContext(ctx, "postgres pool ready",

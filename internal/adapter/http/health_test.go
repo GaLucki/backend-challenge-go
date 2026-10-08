@@ -17,6 +17,22 @@ type stubPinger struct {
 	err error
 }
 
+func TestReadinessIncludesBrokerWhileLivenessRemainsAvailable(t *testing.T) {
+	ready := &atomic.Bool{}
+	ready.Store(true)
+	h := NewHealthHandler(ready, stubPinger{}, config.Config{DBHealthTimeout: time.Second}).WithBroker(stubPinger{err: errors.New("broker unavailable")})
+	rec := httptest.NewRecorder()
+	h.Ready(rec, httptest.NewRequest("GET", "/health/ready", nil))
+	if rec.Code != 503 {
+		t.Fatal("readiness ignored broker", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.Live(rec, httptest.NewRequest("GET", "/health/live", nil))
+	if rec.Code != 200 {
+		t.Fatal("broker outage changed liveness", rec.Code)
+	}
+}
+
 func (s stubPinger) Ping(context.Context) error {
 	return s.err
 }

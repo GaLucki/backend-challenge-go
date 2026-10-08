@@ -81,6 +81,7 @@ func affected(tag pgconn.CommandTag, err error, absent error) error {
 type walletRow struct {
 	id, playerID, currency string
 	balance, version       int64
+	created, updated       time.Time
 }
 
 func (r walletRow) domain() (wallet.Wallet, error) {
@@ -88,27 +89,30 @@ func (r walletRow) domain() (wallet.Wallet, error) {
 	if err != nil {
 		return wallet.Wallet{}, fmt.Errorf("rehydrate wallet money: %w", err)
 	}
-	return wallet.Rehydrate(wallet.ID(r.id), wallet.PlayerID(r.playerID), r.currency, m, r.version)
+	if r.created.IsZero() && r.updated.IsZero() {
+		return wallet.Rehydrate(wallet.ID(r.id), wallet.PlayerID(r.playerID), r.currency, m, r.version)
+	}
+	return wallet.RehydrateWithTimestamps(wallet.ID(r.id), wallet.PlayerID(r.playerID), r.currency, m, r.version, r.created, r.updated)
 }
 func scanWallet(row pgx.Row) (wallet.Wallet, error) {
 	var r walletRow
-	if err := row.Scan(&r.id, &r.playerID, &r.currency, &r.balance, &r.version); err != nil {
+	if err := row.Scan(&r.id, &r.playerID, &r.currency, &r.balance, &r.version, &r.created, &r.updated); err != nil {
 		return wallet.Wallet{}, mapError(err)
 	}
 	return r.domain()
 }
 func (r *walletRepository) Create(ctx context.Context, w wallet.Wallet) error {
-	_, err := r.db.Exec(ctx, `INSERT INTO wallets(id,player_id,currency,balance_cents,version) VALUES($1,$2,$3,$4,$5)`, string(w.ID()), string(w.PlayerID()), w.Currency(), w.Balance().Cents(), w.Version())
+	_, err := r.db.Exec(ctx, `INSERT INTO wallets(id,player_id,currency,balance_cents,version,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, string(w.ID()), string(w.PlayerID()), w.Currency(), w.Balance().Cents(), w.Version(), w.CreatedAt(), w.UpdatedAt())
 	return mapError(err)
 }
 func (r *walletRepository) Get(ctx context.Context, id wallet.ID) (wallet.Wallet, error) {
-	return scanWallet(r.db.QueryRow(ctx, `SELECT id,player_id,currency,balance_cents,version FROM wallets WHERE id=$1`, string(id)))
+	return scanWallet(r.db.QueryRow(ctx, `SELECT id,player_id,currency,balance_cents,version,created_at,updated_at FROM wallets WHERE id=$1`, string(id)))
 }
 func (r *walletRepository) GetForUpdate(ctx context.Context, id wallet.ID) (wallet.Wallet, error) {
 	if !r.transactional {
 		return wallet.Wallet{}, ports.ErrTransactionRequired
 	}
-	return scanWallet(r.db.QueryRow(ctx, `SELECT id,player_id,currency,balance_cents,version FROM wallets WHERE id=$1 FOR UPDATE`, string(id)))
+	return scanWallet(r.db.QueryRow(ctx, `SELECT id,player_id,currency,balance_cents,version,created_at,updated_at FROM wallets WHERE id=$1 FOR UPDATE`, string(id)))
 }
 
 // Update requires the version observed before domain operations, preventing lost updates.
@@ -116,7 +120,7 @@ func (r *walletRepository) Update(ctx context.Context, w wallet.Wallet, expected
 	if !r.transactional {
 		return ports.ErrTransactionRequired
 	}
-	return affectedExec(ctx, r.db, `UPDATE wallets SET balance_cents=$2,version=$3,updated_at=now() WHERE id=$1 AND version=$4 AND player_id=$5 AND currency=$6 AND $3 > $4`, ports.ErrConflict, string(w.ID()), w.Balance().Cents(), w.Version(), expectedVersion, string(w.PlayerID()), w.Currency())
+	return affectedExec(ctx, r.db, `UPDATE wallets SET balance_cents=$2,version=$3,updated_at=$7 WHERE id=$1 AND version=$4 AND player_id=$5 AND currency=$6 AND $3 > $4`, ports.ErrConflict, string(w.ID()), w.Balance().Cents(), w.Version(), expectedVersion, string(w.PlayerID()), w.Currency(), w.UpdatedAt())
 }
 func affectedExec(ctx context.Context, db executor, sql string, absent error, args ...any) error {
 	tag, err := db.Exec(ctx, sql, args...)
@@ -124,6 +128,7 @@ func affectedExec(ctx context.Context, db executor, sql string, absent error, ar
 }
 
 type wagerRow struct {
+	game                                                                                     string
 	id, provider, external, player, wallet, currency, kind, round, reference, state, failure string
 	amount                                                                                   int64
 	created, updated                                                                         time.Time
@@ -135,22 +140,22 @@ func (r wagerRow) domain() (wager.Transaction, error) {
 		return wager.Transaction{}, fmt.Errorf("rehydrate wager money: %w", err)
 	}
 	return wager.Rehydrate(wager.PersistedState{
-		ExternalParams: wager.ExternalParams{ID: wager.TransactionID(r.id), ProviderID: wager.ProviderID(r.provider), ExternalTransactionID: wager.ExternalTransactionID(r.external), PlayerID: wager.PlayerID(r.player), WalletID: wager.WalletID(r.wallet), Type: wager.Type(r.kind), Amount: amount, RoundID: wager.RoundID(r.round), ReferenceExternalTransactionID: wager.ExternalTransactionID(r.reference)},
+		ExternalParams: wager.ExternalParams{ID: wager.TransactionID(r.id), ProviderID: wager.ProviderID(r.provider), ExternalTransactionID: wager.ExternalTransactionID(r.external), PlayerID: wager.PlayerID(r.player), WalletID: wager.WalletID(r.wallet), Type: wager.Type(r.kind), Amount: amount, RoundID: wager.RoundID(r.round), GameID: r.game, ReferenceExternalTransactionID: wager.ExternalTransactionID(r.reference)},
 		State:          wager.State(r.state), FailureCode: wager.FailureCode(r.failure), CreatedAt: r.created, UpdatedAt: r.updated,
 	})
 }
 
-const wagerColumns = `transaction_id,coalesce(provider_id,''),coalesce(external_transaction_id,''),player_id,wallet_id,currency,type,amount_cents,coalesce(round_id,''),coalesce(reference_external_transaction_id,''),state,coalesce(failure_code,''),created_at,updated_at`
+const wagerColumns = `transaction_id,coalesce(provider_id,''),coalesce(external_transaction_id,''),player_id,wallet_id,currency,type,amount_cents,coalesce(round_id,''),coalesce(reference_external_transaction_id,''),state,coalesce(failure_code,''),created_at,updated_at,coalesce(game_id,'')`
 
 func scanWager(row pgx.Row) (wager.Transaction, error) {
 	var r wagerRow
-	if err := row.Scan(&r.id, &r.provider, &r.external, &r.player, &r.wallet, &r.currency, &r.kind, &r.amount, &r.round, &r.reference, &r.state, &r.failure, &r.created, &r.updated); err != nil {
+	if err := row.Scan(&r.id, &r.provider, &r.external, &r.player, &r.wallet, &r.currency, &r.kind, &r.amount, &r.round, &r.reference, &r.state, &r.failure, &r.created, &r.updated, &r.game); err != nil {
 		return wager.Transaction{}, mapError(err)
 	}
 	return r.domain()
 }
 func (r *wagerRepository) Create(ctx context.Context, t wager.Transaction) error {
-	_, err := r.db.Exec(ctx, `INSERT INTO wager_transactions(transaction_id,provider_id,external_transaction_id,player_id,wallet_id,currency,type,amount_cents,round_id,reference_external_transaction_id,state,failure_code,created_at,updated_at) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),$11,NULLIF($12,''),$13,$14)`, string(t.ID()), string(t.ProviderID()), string(t.ExternalTransactionID()), string(t.PlayerID()), string(t.WalletID()), t.Currency(), string(t.Type()), t.Amount().Cents(), string(t.RoundID()), string(t.ReferenceExternalTransactionID()), string(t.State()), string(t.FailureCode()), t.CreatedAt(), t.UpdatedAt())
+	_, err := r.db.Exec(ctx, `INSERT INTO wager_transactions(transaction_id,provider_id,external_transaction_id,player_id,wallet_id,currency,type,amount_cents,round_id,reference_external_transaction_id,state,failure_code,created_at,updated_at,game_id) VALUES($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),$11,NULLIF($12,''),$13,$14,NULLIF($15,''))`, string(t.ID()), string(t.ProviderID()), string(t.ExternalTransactionID()), string(t.PlayerID()), string(t.WalletID()), t.Currency(), string(t.Type()), t.Amount().Cents(), string(t.RoundID()), string(t.ReferenceExternalTransactionID()), string(t.State()), string(t.FailureCode()), t.CreatedAt(), t.UpdatedAt(), t.GameID())
 	return mapError(err)
 }
 func (r *wagerRepository) Get(ctx context.Context, id wager.TransactionID) (wager.Transaction, error) {

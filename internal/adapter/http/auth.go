@@ -34,6 +34,9 @@ func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 			writeAuthError(w, identity.ErrUnauthorized)
 			return
 		}
+		if info := requestInfoFromContext(r.Context()); info != nil {
+			info.ProviderID = p.ProviderID
+		}
 		next.ServeHTTP(w, r.WithContext(identity.WithPrincipal(r.Context(), p)))
 	})
 }

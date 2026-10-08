@@ -74,7 +74,7 @@ go run ./cmd/api
 | --- | --- |
 | `OIDC_ENABLED` | Default `false`; `.env.example` usa `true`. Desabilitar não libera rotas: todos os probes protegidos continuam exigindo autenticação e respondem `401`. |
 | `OIDC_ISSUER_URL` | Issuer completo e exato do realm; obrigatório quando habilitado. |
-| `OIDC_AUDIENCE` | Default `wagering-api`; valor explicitamente vazio desliga somente a validação da audience. Recomenda-se mantê-la configurada. |
+| `OIDC_AUDIENCE` | Default `wagering-api`; valor explicitamente vazio desliga somente a validação da audience em development/test. Desde a fase 11, valor vazio é rejeitado fora desses ambientes. |
 | `OIDC_HTTP_TIMEOUT` | Default `5s`; limite das requisições discovery/JWKS. |
 | `KEYCLOAK_PORT` / `KEYCLOAK_MANAGEMENT_PORT` | Portas locais de Compose: defaults `8081` / `9090`. Ajuste também issuer e URL de testes se mudar a porta. |
 

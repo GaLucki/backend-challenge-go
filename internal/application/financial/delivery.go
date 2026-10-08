@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/junglegaming/backend-challenge-go/internal/domain/wager"
 	"github.com/junglegaming/backend-challenge-go/internal/domain/wallet"
@@ -16,10 +17,11 @@ var (
 )
 
 type DeliveryInput struct {
-	ConsumerName string
-	MessageID    string
-	PayloadHash  string
-	Wager        WagerInput
+	ConsumerName   string
+	MessageID      string
+	PayloadHash    string
+	IdempotencyKey string
+	Wager          WagerInput
 }
 type DeliveryResult struct {
 	Outcome   string
@@ -28,14 +30,21 @@ type DeliveryResult struct {
 
 // ProcessDelivery owns Inbox and the existing financial core in one UoW.
 // It returns only after COMMIT; an adapter may acknowledge the delivery afterward.
-func (s *Service) ProcessDelivery(ctx context.Context, in DeliveryInput) (DeliveryResult, error) {
+func (s *Service) ProcessDelivery(ctx context.Context, in DeliveryInput) (result DeliveryResult, resultErr error) {
+	started := time.Now()
+	defer func() {
+		outcome := "new"
+		if result.Outcome == "duplicate" || result.Outcome == "external_duplicate" || result.Outcome == "replay" {
+			outcome = result.Outcome
+		}
+		s.observeFinancial(ctx, in.Wager, result.Financial, resultErr, started, outcome, in.MessageID)
+	}()
 	if strings.TrimSpace(in.ConsumerName) == "" || strings.TrimSpace(in.MessageID) == "" || len(in.PayloadHash) != 64 {
 		return DeliveryResult{}, ErrInvalidInput
 	}
 	if err := validateWager(in.Wager); err != nil {
 		return DeliveryResult{}, err
 	}
-	var result DeliveryResult
 	err := s.uow.WithinTransaction(ctx, func(r ports.Repositories) error {
 		_, err := r.Inbox.Claim(ctx, ports.InboxMessage{ConsumerName: in.ConsumerName, MessageID: in.MessageID, PayloadHash: in.PayloadHash, ReceivedAt: s.now()})
 		if err != nil {
@@ -52,8 +61,14 @@ func (s *Service) ProcessDelivery(ctx context.Context, in DeliveryInput) (Delive
 			result.Outcome = "duplicate"
 			return nil
 		}
-		financial, err := s.process(ctx, r, in.Wager)
-		if errors.Is(err, ErrDuplicateExternalTransaction) {
+		var financial WagerResult
+		if in.IdempotencyKey != "" {
+			financial, err = s.processIdempotent(ctx, r, HTTPWagerInput{WagerInput: in.Wager,
+				IdempotencyKey: ScopedIdempotencyKey(string(in.Wager.ProviderID), in.IdempotencyKey)})
+		} else {
+			financial, err = s.process(ctx, r, in.Wager)
+		}
+		if errors.Is(err, ErrDuplicateExternalTransaction) && in.IdempotencyKey == "" {
 			// A prior HTTP/SQS operation is accepted only if its financial payload matches.
 			// No current wallet balance is used to reconstruct a financial response.
 			prior, readErr := r.Wagers.GetByExternalID(ctx, in.Wager.ProviderID, in.Wager.ExternalTransactionID)
@@ -74,6 +89,9 @@ func (s *Service) ProcessDelivery(ctx context.Context, in DeliveryInput) (Delive
 		} else {
 			result.Financial = financial
 			result.Outcome = string(financial.State)
+			if financial.IdempotentReplay {
+				result.Outcome = "replay"
+			}
 		}
 		return r.Inbox.Complete(ctx, in.ConsumerName, in.MessageID, s.now())
 	})
@@ -89,5 +107,5 @@ func (s *Service) ProcessDelivery(ctx context.Context, in DeliveryInput) (Delive
 	return result, nil
 }
 func wagerInput(tx wager.Transaction) WagerInput {
-	return WagerInput{ProviderID: tx.ProviderID(), ExternalTransactionID: tx.ExternalTransactionID(), PlayerID: tx.PlayerID(), WalletID: wallet.ID(tx.WalletID()), Type: tx.Type(), Amount: tx.Amount(), RoundID: tx.RoundID(), ReferenceExternalTransactionID: tx.ReferenceExternalTransactionID()}
+	return WagerInput{ProviderID: tx.ProviderID(), ExternalTransactionID: tx.ExternalTransactionID(), PlayerID: tx.PlayerID(), WalletID: wallet.ID(tx.WalletID()), Type: tx.Type(), Amount: tx.Amount(), RoundID: tx.RoundID(), GameID: tx.GameID(), ReferenceExternalTransactionID: tx.ReferenceExternalTransactionID()}
 }

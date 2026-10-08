@@ -35,8 +35,13 @@ func TestOIDCConfiguration(t *testing.T) {
 	if err := c.ValidateOIDC(); err != nil {
 		t.Fatal(err)
 	}
-	// An explicit empty audience disables only the audience check, as documented.
+	// Operational hardening forbids disabling audience validation in production.
 	c.OIDCAudience = ""
+	if c.ValidateOIDC() == nil {
+		t.Fatal("production allowed audience bypass")
+	}
+	// Preserve explicit empty-audience compatibility for development/test only.
+	c.AppEnv = "test"
 	if err := c.ValidateOIDC(); err != nil {
 		t.Fatal(err)
 	}

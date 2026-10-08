@@ -76,7 +76,7 @@ func TestIntegrationRollbackLOSSRejected(t *testing.T) {
 	s := financial.NewService(NewUnitOfWork(pool))
 	w := createFinancialWallet(t, ctx, s, "player", 10000)
 	runFinancial(t, ctx, s, financialInput(t, w.WalletID, "player", "loss", "loss-key", wager.TypeLoss, 0))
-	result := runFinancial(t, ctx, s, referenceInput(t, w.WalletID, "player", "rollback", "rollback-key", wager.TypeRollback, 0, "loss"))
+	result := runFinancial(t, ctx, s, referenceInput(t, w.WalletID, "player", "rollback", "rollback-key", wager.TypeRollback, 1, "loss"))
 	if result.State != wager.StateRejected || result.FailureCode != financial.FailureReferenceTypeInvalid {
 		t.Fatal(result)
 	}

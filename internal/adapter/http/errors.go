@@ -23,7 +23,8 @@ type APIError struct {
 }
 
 type errorResponse struct {
-	Error APIError `json:"error"`
+	Error         APIError `json:"error"`
+	CorrelationID string   `json:"correlationId,omitempty"`
 }
 
 // WriteError writes a consistent JSON error response.
@@ -32,6 +33,7 @@ func WriteError(w http.ResponseWriter, status int, code ErrorCode, message strin
 	w.WriteHeader(status)
 
 	_ = json.NewEncoder(w).Encode(errorResponse{
+		CorrelationID: w.Header().Get(correlationIDHeader),
 		Error: APIError{
 			Code:    code,
 			Message: message,

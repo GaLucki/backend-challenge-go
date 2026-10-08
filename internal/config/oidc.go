@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,9 @@ func (c Config) ValidateOIDC() error {
 	}
 	if c.AppEnv != "development" && c.AppEnv != "test" && u.Scheme != "https" {
 		return fmt.Errorf("OIDC_ISSUER_URL requires HTTPS outside development/test")
+	}
+	if c.AppEnv != "development" && c.AppEnv != "test" && strings.TrimSpace(c.OIDCAudience) == "" {
+		return fmt.Errorf("OIDC_AUDIENCE is required outside development/test")
 	}
 	if c.OIDCHTTPTimeout <= 0 {
 		return fmt.Errorf("OIDC_HTTP_TIMEOUT must be positive")

@@ -9,6 +9,7 @@ var (
 	ErrInvalidPlayerID      = errors.New("invalid player id")
 	ErrInvalidWalletID      = errors.New("invalid wallet id")
 	ErrInvalidRoundID       = errors.New("invalid round id")
+	ErrInvalidGameID        = errors.New("invalid game id")
 	ErrInvalidType          = errors.New("invalid transaction type")
 	ErrInvalidState         = errors.New("invalid transaction state")
 	ErrInvalidAmount        = errors.New("invalid amount")

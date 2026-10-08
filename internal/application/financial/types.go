@@ -68,6 +68,7 @@ type WagerInput struct {
 	Type                           wager.Type
 	Amount                         money.Money
 	RoundID                        wager.RoundID
+	GameID                         string
 	CorrelationID                  string
 	ReferenceExternalTransactionID wager.ExternalTransactionID
 }

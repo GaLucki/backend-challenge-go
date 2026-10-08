@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strings"
 
 	"github.com/junglegaming/backend-challenge-go/internal/observability"
 )
@@ -15,7 +16,7 @@ const correlationIDHeader = "X-Correlation-ID"
 func CorrelationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		correlationID := r.Header.Get(correlationIDHeader)
-		if correlationID == "" {
+		if !validCorrelationID(correlationID) || len(r.Header.Values(correlationIDHeader)) != 1 {
 			correlationID = newCorrelationID()
 		}
 
@@ -23,6 +24,13 @@ func CorrelationMiddleware(next http.Handler) http.Handler {
 		w.Header().Set(correlationIDHeader, correlationID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func validCorrelationID(id string) bool {
+	if len(id) < 1 || len(id) > 128 {
+		return false
+	}
+	return strings.IndexFunc(id, func(r rune) bool { return r < 33 || r > 126 }) == -1
 }
 
 func newCorrelationID() string {

@@ -1,4 +1,26 @@
 services:
+  api:
+    profiles: [app]
+    build:
+      context: .
+      target: runtime
+    image: wagering-api:phase12
+    # Same canonical localhost issuer as host execution and the audit runner.
+    # Requires Linux or Docker Desktop host networking enabled.
+    network_mode: host
+    env_file:
+      - .env.example
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    stop_grace_period: 30s
+
   postgres:
     image: postgres:16-alpine
     container_name: wagering-postgres

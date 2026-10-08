@@ -47,6 +47,13 @@ type Authenticator interface {
 
 type Authorizer struct{}
 
+func (a *Authorizer) RequireTransactionRead(p Principal) error {
+	if a.RequireInternal(p) == nil {
+		return nil
+	}
+	return a.RequireProvider(p)
+}
+
 func NewAuthorizer() *Authorizer { return &Authorizer{} }
 
 func (*Authorizer) RequireProvider(p Principal) error {

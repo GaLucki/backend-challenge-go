@@ -77,19 +77,20 @@ func (m Money) Sub(other Money) (Money, error) {
 		return Money{}, err
 	}
 
-	negated, err := negateCents(other.cents)
-	if err != nil {
-		return Money{}, err
+	if other.cents > 0 && m.cents < math.MinInt64+other.cents {
+		return Money{}, ErrUnderflow
 	}
-	cents, err := addCents(m.cents, negated)
-	if err != nil {
-		return Money{}, err
+	if other.cents < 0 && m.cents > math.MaxInt64+other.cents {
+		return Money{}, ErrOverflow
 	}
-	return Money{cents: cents, currency: m.currency}, nil
+	return Money{cents: m.cents - other.cents, currency: m.currency}, nil
 }
 
 // Negate returns -m. Overflow is detected for math.MinInt64.
 func (m Money) Negate() (Money, error) {
+	if m.currency == "" {
+		return Money{}, ErrInvalidCurrency
+	}
 	cents, err := negateCents(m.cents)
 	if err != nil {
 		return Money{}, err
@@ -114,7 +115,7 @@ func (m Money) Compare(other Money) (int, error) {
 
 // Equal reports whether both amounts and currencies are identical.
 func (m Money) Equal(other Money) bool {
-	return m.currency == other.currency && m.cents == other.cents
+	return m.currency != "" && m.currency == other.currency && m.cents == other.cents
 }
 
 // DecimalString returns the fixed-scale external amount representation.
@@ -154,6 +155,13 @@ func (m Money) ensureSameCurrency(other Money) error {
 }
 
 func normalizeCurrency(currency string) (string, error) {
+	// Supported ISO 4217 currencies all use the contract's two-decimal scale.
+	// A syntactically valid three-letter string is not proof of an ISO currency.
+	switch currency {
+	case "BRL", "USD", "EUR":
+	default:
+		return "", ErrInvalidCurrency
+	}
 	if len(currency) != 3 {
 		return "", ErrInvalidCurrency
 	}

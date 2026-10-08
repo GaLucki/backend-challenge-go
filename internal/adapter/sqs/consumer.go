@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/junglegaming/backend-challenge-go/internal/application/financial"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
+	"github.com/junglegaming/backend-challenge-go/internal/ports"
 )
 
 type API interface {
@@ -45,19 +48,29 @@ type Consumer struct {
 	processor Processor
 	options   Options
 	logger    *slog.Logger
+	metrics   ports.Telemetry
 }
 
 func NewConsumer(api API, processor Processor, options Options, logger *slog.Logger) (*Consumer, error) {
 	if err := options.Validate(); err != nil {
 		return nil, err
 	}
-	return &Consumer{api: api, processor: processor, options: options, logger: logger}, nil
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Consumer{api: api, processor: processor, options: options, logger: logger, metrics: ports.NoopTelemetry{}}, nil
+}
+func (c *Consumer) WithTelemetry(t ports.Telemetry) *Consumer {
+	if t != nil {
+		c.metrics = t
+	}
+	return c
 }
 func Classify(err error) string {
 	if err == nil {
 		return "accepted"
 	}
-	for _, permanent := range []error{ErrInvalidEnvelope, ErrInvalidGroup, financial.ErrDeliveryIntegrity, financial.ErrExternalPayloadConflict, financial.ErrInvalidInput, financial.ErrInvalidAmount, financial.ErrInvalidOperationType, financial.ErrWalletNotFound, financial.ErrPlayerMismatch, financial.ErrCurrencyMismatch} {
+	for _, permanent := range []error{ErrInvalidEnvelope, ErrInvalidGroup, financial.ErrDeliveryIntegrity, financial.ErrExternalPayloadConflict, financial.ErrIdempotencyConflict, financial.ErrDuplicateExternalTransaction, financial.ErrInvalidInput, financial.ErrInvalidAmount, financial.ErrInvalidOperationType, financial.ErrWalletNotFound, financial.ErrPlayerMismatch, financial.ErrCurrencyMismatch} {
 		if errors.Is(err, permanent) {
 			return "permanent"
 		}
@@ -67,7 +80,22 @@ func Classify(err error) string {
 
 // Process deliberately has no ACK. It allows recovery tests to stop a consumer
 // after a real database commit and before its SQS receipt is deleted.
-func (c *Consumer) Process(ctx context.Context, message types.Message) (financial.DeliveryResult, error) {
+func (c *Consumer) Process(ctx context.Context, message types.Message) (result financial.DeliveryResult, resultErr error) {
+	started := time.Now()
+	c.metrics.InFlight("sqs_in_flight", 1)
+	defer func() {
+		c.metrics.InFlight("sqs_in_flight", -1)
+		c.metrics.Duration("sqs_processing_duration_seconds", time.Since(started))
+		if resultErr != nil {
+			c.metrics.Count("sqs_events_total", Classify(resultErr)+"_failure")
+			if errors.Is(resultErr, financial.ErrPersistence) {
+				c.metrics.Count("dependency_failures_total", "postgres", "consumer")
+			}
+		}
+		if result.Outcome == "duplicate" || result.Outcome == "external_duplicate" || result.Outcome == "replay" {
+			c.metrics.Count("sqs_events_total", "duplicate")
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return financial.DeliveryResult{}, err
 	}
@@ -82,14 +110,29 @@ func (c *Consumer) Process(ctx context.Context, message types.Message) (financia
 	if err != nil {
 		return financial.DeliveryResult{}, err
 	}
+	ctx = observability.WithCorrelationID(ctx, envelope.CorrelationID)
+	ctx = observability.WithMessageID(ctx, envelope.MessageID)
 	processCtx, cancel := context.WithTimeout(ctx, c.options.ProcessingTimeout)
 	defer cancel()
-	result, err := c.processor.ProcessDelivery(processCtx, financial.DeliveryInput{ConsumerName: c.options.ConsumerName, MessageID: envelope.MessageID, PayloadHash: hash, Wager: input})
-	c.logger.InfoContext(ctx, "SQS delivery processed", "consumerName", c.options.ConsumerName, "messageId", envelope.MessageID, "sqsMessageId", aws.ToString(message.MessageId), "correlationId", envelope.CorrelationID, "transactionId", result.Financial.TransactionID, "walletId", envelope.WalletID, "providerId", envelope.ProviderID, "receiveCount", message.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)], "outcome", result.Outcome, "failureCode", result.Financial.FailureCode, "classification", Classify(err))
+	result, err = c.processor.ProcessDelivery(processCtx, financial.DeliveryInput{ConsumerName: c.options.ConsumerName, MessageID: envelope.MessageID, PayloadHash: hash, IdempotencyKey: envelope.IdempotencyKey, Wager: input})
+	c.logger.InfoContext(ctx, "SQS delivery processed", "consumerName", c.options.ConsumerName, "messageId", envelope.MessageID, "sqsMessageId", aws.ToString(message.MessageId), "correlationId", envelope.CorrelationID, "transactionId", result.Financial.TransactionID, "walletId", envelope.WalletID, "providerId", envelope.ProviderID, "operationType", envelope.Type, "durationMs", time.Since(started).Milliseconds(), "receiveCount", message.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)], "outcome", result.Outcome, "failureCode", result.Financial.FailureCode, "classification", Classify(err))
 	return result, err
 }
 func (c *Consumer) Handle(ctx context.Context, message types.Message) error {
 	if _, err := c.Process(ctx, message); err != nil {
+		if Classify(err) == "transient" {
+			if api, ok := c.api.(interface {
+				ChangeMessageVisibility(context.Context, *awssqs.ChangeMessageVisibilityInput, ...func(*awssqs.Options)) (*awssqs.ChangeMessageVisibilityOutput, error)
+			}); ok {
+				attempt, _ := strconv.ParseInt(message.Attributes["ApproximateReceiveCount"], 10, 32)
+				retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.options.AckTimeout)
+				_, retryErr := api.ChangeMessageVisibility(retryCtx, &awssqs.ChangeMessageVisibilityInput{QueueUrl: aws.String(c.options.QueueURL), ReceiptHandle: message.ReceiptHandle, VisibilityTimeout: retryVisibility(c.options.ReceiveRetryDelay, c.options.VisibilitySeconds, int32(attempt))})
+				cancel()
+				if retryErr != nil {
+					c.metrics.Count("dependency_failures_total", "sqs", "consumer")
+				}
+			}
+		}
 		c.logger.WarnContext(ctx, "SQS delivery retained", "consumerName", c.options.ConsumerName, "sqsMessageId", aws.ToString(message.MessageId), "receiveCount", message.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)], "classification", Classify(err))
 		return err
 	}
@@ -97,14 +140,36 @@ func (c *Consumer) Handle(ctx context.Context, message types.Message) error {
 	defer cancel()
 	_, err := c.api.DeleteMessage(ackCtx, &awssqs.DeleteMessageInput{QueueUrl: aws.String(c.options.QueueURL), ReceiptHandle: message.ReceiptHandle})
 	if err != nil {
+		c.metrics.Count("sqs_events_total", "delete_failure")
+		c.metrics.Count("dependency_failures_total", "sqs", "consumer")
 		c.logger.WarnContext(ctx, "SQS acknowledgement failed", "consumerName", c.options.ConsumerName, "sqsMessageId", aws.ToString(message.MessageId))
+	} else {
+		c.metrics.Count("sqs_events_total", "completed")
 	}
 	return err
+}
+
+func retryVisibility(base time.Duration, maximum, attempt int32) int32 {
+	seconds := max(int32(1), int32(min(base/time.Second, time.Duration(43200))))
+	for n := int32(1); n < attempt && seconds < maximum; n++ {
+		if seconds > maximum/2 {
+			return maximum
+		}
+		seconds *= 2
+	}
+	return min(seconds, maximum)
 }
 func (c *Consumer) Receive(ctx context.Context) ([]types.Message, error) {
 	out, err := c.api.ReceiveMessage(ctx, &awssqs.ReceiveMessageInput{QueueUrl: aws.String(c.options.QueueURL), WaitTimeSeconds: c.options.WaitSeconds, VisibilityTimeout: c.options.VisibilitySeconds, MaxNumberOfMessages: c.options.MaxMessages, MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameMessageGroupId, types.MessageSystemAttributeNameMessageDeduplicationId, types.MessageSystemAttributeNameApproximateReceiveCount}})
 	if err != nil {
+		if ctx.Err() == nil {
+			c.metrics.Count("sqs_events_total", "poll_failure")
+			c.metrics.Count("dependency_failures_total", "sqs", "consumer")
+		}
 		return nil, err
+	}
+	for range out.Messages {
+		c.metrics.Count("sqs_events_total", "received")
 	}
 	return out.Messages, nil
 }

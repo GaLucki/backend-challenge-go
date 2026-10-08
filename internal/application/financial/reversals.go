@@ -13,6 +13,38 @@ import (
 
 func isReversal(kind wager.Type) bool { return kind == wager.TypeRefund || kind == wager.TypeRollback }
 
+// A WIN may reference an already processed BET in the same financial scope.
+// Missing/invalid references are auditable rejections; only reversals wait for
+// future references. A win amount need not equal the referenced bet amount.
+func validateWinReference(ctx context.Context, r ports.Repositories, tx wager.Transaction) (wager.FailureCode, error) {
+	ref, err := r.Wagers.GetByExternalID(ctx, tx.ProviderID(), tx.ReferenceExternalTransactionID())
+	if errors.Is(err, ports.ErrNotFound) {
+		return FailureReferenceNotFound, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if ref.Type() != wager.TypeBet {
+		return FailureReferenceTypeInvalid, nil
+	}
+	if ref.State() != wager.StateProcessed {
+		return FailureReferenceStateInvalid, nil
+	}
+	if ref.PlayerID() != tx.PlayerID() {
+		return FailureReferencePlayerMismatch, nil
+	}
+	if ref.WalletID() != tx.WalletID() {
+		return FailureReferenceWalletMismatch, nil
+	}
+	if ref.Currency() != tx.Currency() {
+		return FailureReferenceCurrencyMismatch, nil
+	}
+	if ref.RoundID() != tx.RoundID() {
+		return FailureReferenceRoundMismatch, nil
+	}
+	return "", nil
+}
+
 func validateReference(tx, ref wager.Transaction) (ports.LedgerDirection, wager.FailureCode) {
 	var direction ports.LedgerDirection
 	switch tx.Type() {

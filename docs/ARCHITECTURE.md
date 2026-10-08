@@ -14,7 +14,11 @@ pending-reference worker. Phase 6 adds the incoming SQS FIFO transport, transact
 LocalStack provisioning and crash recovery. Phase 7 publishes committed Outbox envelopes through
 durable leases to a separate events FIFO. Phase 8 adds Keycloak OIDC access-token
 validation, typed identities and application-level provider/internal authorization.
-Final wagering HTTP APIs remain for a later phase.
+Phase 9 exposes the financial HTTP API, stable ledger pagination and authorized
+read snapshots. Phase 10 implements internal-only, read-only wallet reconciliation
+with a consistent PostgreSQL snapshot and structured financial divergences.
+Phase 11 adds internal-only Prometheus metrics, bounded instrumentation, sanitized
+logging, operational sampling and coordinated readiness/draining on shutdown.
 
 ## Package structure
 
@@ -27,6 +31,9 @@ Final wagering HTTP APIs remain for a later phase.
 | `internal/application/pending_worker.go` | Financial policy/worker construction and Fx lifecycle hooks |
 | `internal/adapter/http` | HTTP server, health endpoints, error envelope, middleware |
 | `internal/adapter/oidc` | OIDC discovery, RS256 access-token verification and shared JWKS cache |
+| `internal/application/financial/reads.go` | Authorized transaction snapshots and wallet-bound ledger cursor |
+| `internal/adapter/postgres/financial_reads.go` | Keyset ledger query and single-statement transaction/result snapshot |
+| `internal/ports/financial_reads.go` | Read query contracts independent of SQL/HTTP |
 | `internal/identity` | Typed Principal, context, authenticator port and reusable authorization policy |
 | `internal/application/financial/authorized.go` | Authenticated financial facade, provider isolation and scoped HTTP idempotency |
 | `infra/keycloak` | Automatic local realm, roles, clients and service-account provisioning |
@@ -977,7 +984,8 @@ perform IdP I/O for every health probe. Liveness remains independent of the IdP.
 `OIDC_ENABLED=false` skips discovery but **never grants access** to protected
 routes: authentication fails closed with `401`. The .env example enables OIDC.
 `OIDC_AUDIENCE` defaults to `wagering-api`; an explicitly empty value disables only
-the audience comparison. Issuer/signature/expiry validation remain mandatory.
+the audience comparison in development/test. Since phase 11, other environments
+require a nonempty audience. Issuer/signature/expiry validation remain mandatory.
 Issuer HTTP is allowed only for development/test configuration; other environments
 require HTTPS. Legacy `KEYCLOAK_URL` is not used for authentication.
 
@@ -1063,6 +1071,404 @@ References: [Keycloak service accounts](https://www.keycloak.org/docs/latest/ser
 [Keycloak 26.7.5](https://www.keycloak.org/2026/09/keycloak-2675-released),
 [go-oidc verifier and JWKS implementation](https://github.com/coreos/go-oidc).
 
+## Phase 9: financial HTTP contracts and read queries
+
+The final financial routes use the existing net/http ServeMux and OIDC middleware,
+`financial.AuthorizedService` commands and `financial.ReadService` queries:
+
+| Endpoint | Permission | Behavior |
+| --- | --- | --- |
+| POST /wallets | Internal | Existing CreateWallet/atomic OPENING; omitted/null initialBalance is zero |
+| GET /wallets/{walletId} | Internal | Wallet/player/currency/balance/version |
+| GET /wallets/{walletId}/ledger | Internal | Decimal amounts, before/after balance, timestamps; keyset pagination |
+| POST /wagering/transactions | Provider | Existing HTTP idempotency and financial core; token providerId, optional equal body value |
+| GET /wagering/transactions/{transactionId} | Own provider / internal | Authorized persisted transaction and optional original HTTP result |
+| GET /providers/{providerId}/wagering/transactions/{externalTransactionId} | Own provider / internal | Compare provider path to principal before query |
+| POST /wallets/{walletId}/reconciliation | Internal | Since phase 10: read-only audit, 200 CONSISTENT/DIVERGENT |
+| GET /health/live and /health/ready | Public | Existing policies retained |
+
+Phase 8 `/auth/*` probes remain. Wallets are player/currency-scoped; there is no
+persisted provider-wallet ownership. Having a transaction does not grant full
+wallet or ledger access. We preserve internal-only direct wallet/ledger reads,
+without adding an ambiguous relationship or a schema migration. Provider-owned
+transaction reads retain phase 8's Forbidden for existing foreign resources;
+absent IDs are NotFound. Authorization executes at the application query/command
+boundary as well as HTTP's early permission checks. HTTP contains no wagering,
+reversal, reference-resolution, ledger/write, locking or idempotency algorithm.
+
+### Transport contract and response policy
+
+JSON requests require application/json (optional UTF-8 charset), at most 64 KiB,
+one JSON value, known fields and valid textual identifiers. No UUID assumption is
+introduced: generated IDs are hexadecimal text. Identifiers/key have 1–256 UTF-8
+bytes, no whitespace/control characters or `/`, `\\`, `?`, `#`. Financial Money
+requires a decimal **string with exactly two places** and uppercase three-letter
+currency. This tightens only the HTTP representation: Money.ParseDecimal still
+does integer arithmetic/overflow detection and is unchanged for the SQS/core
+contract. OPENING is rejected at HTTP. LOSS, positive BET/WIN and required
+REFUND/ROLLBACK references are checked by the existing application/domain rules.
+
+Status: 201 for created wallet/new PROCESSED wager, 200 for processed replay,
+202 for persistent PENDING_REFERENCE (also pending replay), and 422 for a saved
+REJECTED/FAILED outcome. A 422 returns the financial result with transaction ID,
+failureCode and observed balance, preserving the committed rejection. It is not
+an infrastructure error. Existing key/payload conflict, external identity conflict
+and wallet uniqueness yield 409. Invalid request/key/cursor yields 400; missing
+resources 404; missing/invalid authentication 401; denied permission 403;
+unsupported Content-Type 415; excessive body 413; unsupported method 405 with
+Allow; unavailable financial dependency/context 503; unclassified failure 500.
+Errors retain `{error:{code,message}}` and add a top-level correlationId from the
+existing middleware, with no SQL/stack/credential details. Health remains public.
+
+Command POST responses use the actual persisted `WagerResult`; replay never reads
+current wallet balance to reconstruct results. Header Idempotency-Key is required,
+single-valued and never generated automatically. The phase 8 provider namespace
+and phase 4/5 canonical hash/saved result are reused. Changed valid payloads
+conflict; malformed transport input is rejected before reaching application.
+HTTP and SQS still share provider/external identity uniqueness in the same core.
+
+GET transaction includes domain metadata plus optional `result` from its saved
+HTTP idempotency record. `FinancialReader.GetTransactionSnapshot` loads the
+transaction and saved JSON in one SQL statement/MVCC snapshot. A concurrent
+pending-resolution transaction therefore cannot yield old domain state combined
+with new saved result. Authorization checks resource ownership before returning
+or decoding saved financial data. SQS-only/OPENING transactions without a saved
+HTTP result omit that field; no current observed balance is invented. Currency
+and amounts remain nested decimal Money representations, all timestamps UTC.
+
+### Ledger pagination and operational limits
+
+Ledger ordering is `(wallet_version ASC, id COLLATE "C" ASC)`. Wallet version is
+the serialized financial order rather than process wall-clock order, and ID is
+a deterministic tie-breaker. A versioned raw URL-safe Base64 cursor encodes
+wallet ID plus last returned position. It is opaque to clients, bound to the
+wallet, canonical, bounded and strictly decoded. It is not an authorization
+grant or a secret. The application asks SQL for `limit+1`, emits at most limit
+entries and provides nextCursor only when another entry exists. Default is 50,
+range 1–100. Empty ledger has items []; no nextCursor denotes exhaustion. No
+offset: append-only entries are stable; concurrent appends may appear in later
+pages, without repeating earlier entries. It is not a frozen multi-request snapshot.
+Existing indexes/schema suffice for correctness; additional performance indexing
+is not introduced merely to ease a handler. No UPDATE/DELETE ledger route exists.
+
+Server ReadHeaderTimeout=5s, ReadTimeout=10s, WriteTimeout=15s, IdleTimeout=60s,
+MaxHeaderBytes=32 KiB and request context budget=10s. Graceful Fx shutdown is
+retained. Every response has X-Content-Type-Options: nosniff; no wildcard CORS.
+Request logs now capture method, route template, status, latency (durationMs),
+correlationId and provider/transaction/wallet IDs and replay when available.
+A per-request metadata holder enriches the existing log middleware without
+inventing another correlation-ID channel. Raw Authorization, key and payload
+are never logged; route template avoids dumping arbitrary URL/query parameters.
+
+### Evidence and scope boundary
+
+Unit tests cover strict DTOs/Money, auth roles, status/result mapping, request
+limits/Content-Type/unknown fields/trailing JSON, errors/correlation, identifiers,
+ledger cursor/limits, stored snapshots, public health, reconciliation and safe logs.
+Real PostgreSQL+Keycloak+Fx tests drive HTTP sockets through all five operations,
+wallet/opening/zero balance, A/B ownership denial, body spoofing, original balance
+replay, both conflict types, persisted rejection, pending/worker resolution,
+ledger keyset during append, restart and equality of stored balance/ledger sum.
+Three independent Fx graphs/pools process 50 identical HTTP attempts with one
+debit and two competing 80.00 BETs on 100.00 with one processed, one rejected and
+20.00 remaining. Final HTTP→SQS and SQS→HTTP regression uses actual LocalStack
+messages, SDK Receive/ACK and durable Inbox, confirming no repeated effects.
+All prior regression tests remain intact and run in the complete real suite.
+
+During phase 9, reconciliation checked internal permission and ID syntax and
+returned 501. Phase 10 replaces this placeholder as described below. Tracing,
+final metrics and final audit remain outside these phases. No new runtime
+dependencies or migrations were required.
+
+Contracts: [openapi.yaml](openapi.yaml), [OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3.html).
+Commands: [PHASE9_OPERATIONS.md](PHASE9_OPERATIONS.md).
+Results and inventory: [PHASE9_REPORT.md](PHASE9_REPORT.md).
+
+## Phase 10: wallet reconciliation
+
+Reconciliation compares a wallet's persisted balance/version to its complete
+append-only ledger and relevant wagering transactions. It reports evidence;
+it never updates balances/versions, repairs records, inserts compensation,
+claims idempotency, creates transactions, touches Inbox or produces Outbox.
+There is no reconciliation results table: callers receive the report and the
+existing structured request log records its status and counts.
+
+`ReconciliationService` depends on `ports.ReconciliationReader` and the existing
+identity Authorizer. Fx injects PostgreSQL's reader and the service into the
+financial HTTP handler. Authorization is checked both by the handler and by
+the application before any database access: internal-service only, providers
+403, unauthenticated requests 401. Missing wallets return 404; infrastructure
+errors or canceled/deadline-exceeded reads return 503 without a partial report.
+
+### Snapshot and queries
+
+The reader begins a separate `REPEATABLE READ, READ ONLY` transaction; the first
+wallet SELECT establishes its MVCC snapshot. It then selects every ledger entry
+for that wallet and the deduplicated set of wallet transactions, ledger-linked
+transactions and immediate provider-scoped reversal references. These are three
+queries, without N+1, `FOR UPDATE`, global locks or a public pagination limit.
+Related foreign records are read only when needed to diagnose corrupted links.
+Existing wallet, ledger and provider/external indexes are reused. No migration
+or write UnitOfWork change is needed; write idempotency stays READ COMMITTED.
+
+All three reads see the same committed database state, and each normal financial
+commit atomically includes wallet, ledger and transaction. Later commits cannot
+produce a mixed audit. See PostgreSQL 16's
+[isolation documentation](https://www.postgresql.org/docs/16/transaction-iso.html)
+and [read-only mode](https://www.postgresql.org/docs/16/sql-set-transaction.html).
+MVCC reads permit same-wallet and other-wallet writes to progress. Ordinary
+ACCESS SHARE table locks can still conflict with DDL, and a long snapshot can
+delay vacuum cleanup. Results reflect the snapshot, not a guarantee that the
+wallet remains unchanged after the response. `checkedAt` is UTC completion time.
+
+The snapshot loads only relevant rows into memory, O(history); application
+ordering is O(n log n), maps/checks are O(n). This is sufficient for the challenge
+and verified with 130 entries. Arbitrarily large histories may need streaming
+in the same transaction in a later requirement. The existing HTTP context budget
+is 10 seconds; timeout is a technical error, never a truncated success report.
+Rows errors, scan failures, commit failures and canceled reads discard the whole
+snapshot. Deferred rollback uses a bounded context independent of cancellation.
+
+### Balance and ledger chain
+
+Order is `(wallet_version, id COLLATE "C")`, matching the ledger endpoint. Begin
+at zero for both positive-OPENING and zero-created wallets. Reconstruct each
+CREDIT/DEBIT using domain `Money.Add/Sub`, never floating point or unchecked
+aggregates. Amount must be positive, direction known, and balances nonnegative.
+Check first before=0, each subsequent before=preceding stored after, each entry's
+after=before +/- amount, and final stored after=wallet balance. Independently
+compare the reconstructed amount to wallet balance, so a correct sum cannot
+hide a broken chain. Detect overflow/underflow and negative reconstruction.
+
+Ledger has no currency column; its currency is inherited from its wallet. Audit
+compares each linked transaction's currency with that wallet currency. It does
+not invent historical currency evidence that the schema never stored.
+
+### Transactions and version
+
+PROCESSED BET requires one DEBIT; WIN/OPENING require one CREDIT. OPENING must be
+positive, unique and first. A zero-created wallet has no opening. LOSS requires
+zero amount and no entry. REFUND credits a BET; ROLLBACK credits a BET or debits
+a WIN/REFUND. Reconciliation calls the exact existing `validateReference` used
+by first processing and pending resolution, including provider/player/wallet,
+currency, round, processed state and equal amount. It does not execute reversals.
+PENDING, PENDING_REFERENCE, REJECTED and FAILED must have no ledger. FAILED is a
+terminal unsuccessful domain state and has no committed financial movement in
+the current core; it is not treated as PROCESSED. Raw audit transaction records
+preserve malformed historical evidence rather than forcing valid rehydration.
+
+Check missing transaction, foreign wallet, wrong currency/amount/direction,
+missing required ledger and unexpected/duplicate entries independently of the
+database constraints. The expected wallet version is 1 + valid PROCESSED
+balance-changing transactions excluding OPENING. LOSS and unsuccessful/pending
+states do not increment. Positive OPENING stays version 1; a zero wallet's first
+later movement is version 2. Also verify each ledger version in movement order.
+Missing/duplicate ledger is not hidden by counting its rows as transactions.
+
+### Response, evidence and logging
+
+Successful audit returns HTTP 200 with `CONSISTENT` and an empty divergences
+array, or `DIVERGENT` with stable codes and sanitized expected/actual evidence.
+Both contain walletId, currency, walletBalance, ledgerBalance, walletVersion,
+expectedWalletVersion, entries/transactions checked and checkedAt. Repeated
+reads of unchanged data have the same conclusion, with a new checkedAt.
+`transactionsChecked` includes the related rows actually inspected, deduplicated.
+
+Codes: BALANCE_MISMATCH, LEDGER_CHAIN_BROKEN, LEDGER_AMOUNT_MISMATCH,
+LEDGER_DIRECTION_MISMATCH, LEDGER_CURRENCY_MISMATCH,
+LEDGER_TRANSACTION_NOT_FOUND, TRANSACTION_LEDGER_MISSING,
+UNEXPECTED_LEDGER_ENTRY, NEGATIVE_RECONSTRUCTED_BALANCE,
+WALLET_VERSION_MISMATCH, TRANSACTION_WALLET_MISMATCH,
+DUPLICATE_LEDGER_ENTRY, LEDGER_ARITHMETIC_OVERFLOW and TRANSACTION_INVALID.
+Details carry optional transactionId/ledgerEntryId, expected, actual and a fixed
+message; monetary chain/amount evidence uses cents, sum evidence uses decimals.
+No SQL, stack, token or secret is returned. Multiple independent checks may
+produce multiple divergences for one corrupted row.
+
+`ledgerBalance` is null if invalid amount/direction or arithmetic overflow makes
+safe reconstruction impossible. It can be negative in a corrupted history and
+uses a separate signed decimal audit schema; normal API Money stays nonnegative.
+`expectedWalletVersion` is null for invalid transaction semantics or multiple
+OPENING records; it never fabricates a safe expected value. These remain
+complete DIVERGENT audits. Unreadable infrastructure yields no financial report.
+
+The existing HTTP completion log includes correlationId, walletId, durationMs,
+reconciliationStatus, ledgerEntriesChecked, transactionsChecked and
+divergenceCount. Technical failure uses reconciliationStatus=ERROR and HTTP
+status, without raw errors/history. This phase does not add final metrics or
+tracing. Evidence preservation and an explicit future correction policy are why
+automatic repair is deliberately absent.
+
+### Validation
+
+PostgreSQL integration tests cover zero/opening, all operations and three rollback
+directions, rejected/pending/resolved transactions, full history, repeated reads
+and exact before/after JSON for every row across eight financial/messaging tables.
+Seventeen corruption cases use disposable schemas only; any trigger bypass is
+transactional and re-enabled before audit, with append-only rejection verified.
+Dropped constraints affect only that disposable schema and disappear on cleanup;
+production migrations remain intact. Corruption tests include missing transaction,
+missing ledger, duplicate, foreign wallet, currency, negative balance and overflow.
+
+Deterministic concurrency tests wrap pgx only in tests and pause after the first
+real SELECT establishes a snapshot. A same-wallet or different-wallet BET must
+commit before releasing the audit; its report remains the prior consistent state,
+and a fresh audit observes the commit. Cancellation also proves no partial result.
+Real Keycloak HTTP tests verify 401, both providers 403, internal 200, missing 404,
+DIVERGENT 200 without mutation and database failure 503. Phase 9's former 501
+assertions now assert a 200 result; its real full financial history must reconcile
+CONSISTENT. The entire preceding regression suite is preserved.
+
+Operation: [PHASE10_OPERATIONS.md](PHASE10_OPERATIONS.md).
+Inventory and verification: [PHASE10_REPORT.md](PHASE10_REPORT.md).
+
+## Phase 11: observability and operational hardening
+
+### Registry, endpoint and labels
+
+The official [Prometheus client_golang](https://github.com/prometheus/client_golang)
+v1.24.1 is pinned in go.mod. Each Fx application owns a private registry and
+Go/process collectors, avoiding global registration collisions between instances
+or tests. Application instrumentation depends on `ports.Telemetry`; it records
+counts and elapsed time, never money or financial identifiers. The implementation
+has finite whitelists for operation, state, outcome, result, code, method, HTTP
+status, route, dependency and component before creating a vector series. Unknown
+values collapse to other/unmatched. No provider/player/wallet/transaction/message/
+event IDs are labels. See Prometheus's
+[instrumentation guidance](https://prometheus.io/docs/practices/instrumentation/).
+
+`GET /metrics` uses the same HTTP server and existing OIDC/internal authorization:
+no token 401, both providers 403, internal-service 200. METRICS_ENABLED defaults
+true; false removes the route and instrumentation/sampling. There is no public
+mode or secret in a query parameter. With OIDC disabled the endpoint still denies
+unauthenticated callers. It supports Prometheus text and OpenMetrics negotiation.
+Normal financial HTTP contracts are unchanged. A scrape reads cached metrics and
+pgxpool.Stat only, never PostgreSQL queries or SQS network calls.
+
+### Counting semantics
+
+HTTP metrics cover requests including auth failures, normalized route templates,
+bounded methods/status, duration and in-flight requests. Financial attempts and
+duration are observed once at the shared core entry points, after the actual SQL
+transaction returns. HTTP and SQS adapters do not recount financial outcomes.
+`financial_operations_total{operation,state}` counts newly created committed
+transactions by their **initial committed state**, including positive OPENING,
+LOSS, rejected and PENDING_REFERENCE. Zero-created wallets have no financial
+opening observation. This counter is not a gauge of current transaction states.
+
+`financial_movements_total{operation}` counts actual committed balance changes;
+OPENING is counted, LOSS/rejected/pending creation are excluded. A pending
+resolution counts its later financial movement, but never a new operation.
+Pending retry/resolved/expired/rejected/error outcomes have separate counters.
+Financial FAILED is supported as a bounded state when an operation produces it;
+the existing normal core does not create FAILED outcomes. Replays, Inbox duplicate
+deliveries, matching external duplicates and conflicts have separate counters;
+no replay is a new operation or balance change. Instrumentation after failed
+commit/rollback does not increment successful-effect counters.
+
+Counters are process-local observations, resetting on restart. They are not
+persistent financial accounting or exactly-once telemetry: a crash between durable
+commit and observation can undercount. PostgreSQL/ledger remain the financial
+source of truth. Aggregate counters across replicas represent observations made
+by those replicas; do not add per-replica global backlog gauges together.
+
+### Messaging and backlog
+
+SQS records SDK receive messages, processing in flight/duration, durable
+processing plus successful DeleteMessage completion, duplicates, transient and
+permanent failures, ACK failures and polling failures. A successful core commit
+before ACK failure is not counted as completed/ACKed. Process-only crash recovery
+tests still perform no ACK. No counter claims the consumer moved data to DLQ.
+
+Outbox records confirmed published marks, send failures, confirmed retry schedules,
+lease loss, store/mark failures and duration. eventId/envelope, claim fencing,
+ordering and publish-after-commit semantics are unchanged. Sender acceptance
+followed by a failed published mark is a mark failure, not a confirmed published
+counter; redelivery is still possible and uses the stable eventId.
+
+One bounded collector loop samples a single aggregate SQL query scoped to
+unpublished Outbox rows and uncompleted pending references every 15s by default.
+It exposes unpublished count, future retry count, oldest-unpublished age and
+pending reference count. Lag includes leased/future-retry events and is zero for
+an empty backlog. It does not query all wallet histories or the ledger. Existing
+partial indexes and schema are reused; no migration was added.
+
+When SQS is enabled, the same loop samples the configured DLQ's approximate visible
+plus not-visible message attributes. DLQ depth is explicitly approximate, with
+separate enabled/success/last-success timestamp gauges. PostgreSQL samples also
+have success and last-success timestamps. Failed collections retain prior values
+and expose success=0; an outage never fabricates an empty backlog. Each I/O has a
+default 2s timeout, and errors are sanitized and counted by dependency/component.
+Collection calls are serialized; scrapes do not cause extra I/O. Sampling stops
+and its goroutine is joined before closing the pool.
+
+pgxpool process-local gauges show total/acquired/idle/max connections; counters
+show acquires, cumulative acquisition duration, canceled/empty acquires, read from
+Stat without SQL. Go/process collectors provide runtime statistics. Reconciliation
+counts CONSISTENT/DIVERGENT/ERROR executions, each divergence code and duration;
+there is no wallet label or history log. Counts of divergences are occurrences,
+not distinct wallets, and repeated divergent audits increment them again.
+
+### Safe logging and correlation
+
+JSON slog is preserved. Core attempts, Inbox delivery outcomes, pending outcomes,
+SQS consumer, Outbox publisher, reconciliation/HTTP, sampling and lifecycle logs
+contain IDs only in logs when useful, along with operation/status/duration/retries.
+Outbox lease tokens are no longer logged. ReplaceAttr redacts credential/payload
+attribute keys and replaces error objects with a fixed dependency_failure class.
+Config/pgxpool startup errors never embed a credential-bearing DSN or raw invalid
+duration. No raw bearer header, client secret, password or financial payload is
+recorded. Logging a correlation ID does not regenerate it: HTTP input flows to
+application/Outbox, SQS envelope to Inbox/application/Outbox and persisted pending
+correlation to resolution/Outbox. HTTP correlation IDs are bounded to 128 printable
+ASCII characters without whitespace; invalid/repeated headers get a generated ID.
+
+Production OIDC requires an explicit nonempty audience as well as HTTPS issuer;
+the documented empty-audience compatibility remains limited to development/test.
+The existing production empty-audience bypass was closed with a regression test;
+issuer/audience/signature validation and financial authorization otherwise remain
+unchanged. Metrics uses that same internal policy; it introduces no auth bypass.
+
+### Health and lifecycle
+
+Liveness checks process availability. Readiness checks completed required startup
+hooks plus PostgreSQL connectivity using the existing health timeout. OIDC
+discovery, required SQS queue validation and publisher setup must succeed before
+the final Fx hook marks ready. Transient SQS runtime failure causes retention/
+backoff, not liveness failure or automatic process restart. Durable Inbox/Outbox
+allow broker recovery without restarting the process. Readiness gauge reflects
+the last probe, not a background network probe.
+
+Stop order is reverse Fx hook order: mark unready; cancel/join operational sampler;
+stop new publisher/consumer polling and drain bounded in-flight work; cancel/join
+pending worker; drain HTTP handlers; close PostgreSQL pool. Pool failed-start
+ping closes the newly allocated pool because Fx does not stop a failed OnStart
+hook. Pending shutdown now waits for canceled work/rollback cleanup even when the
+stop context expires. HTTP rejects new work, attempts Shutdown within the configured
+timeout, closes connections on timeout and joins tracked active handlers before
+pool closure. This can exceed a grace deadline by bounded cancellation/SQL rollback
+cleanup; deadlines never authorize marking uncommitted work as complete.
+
+### Validation and scope
+
+Unit tests validate private registration, concurrency, finite labels, counters,
+histograms, disabled mode, route normalization, endpoint authorization, secret
+redaction, config validation, replay/rollback accounting, SQS/Outbox confirmation
+boundaries, reconciliation outcomes, stale samples, collector cancellation and
+HTTP drain. Real integration uses PostgreSQL, Keycloak and disposable LocalStack
+queues: protected scrape, financial outcomes/replay/conflicts, pending retry/
+resolution/TTL, reconciliation, readiness failure, Inbox duplicate/hash conflict,
+SDK poll/ACK failure, publisher retry/publication, real DLQ attributes and shutdown.
+All earlier financial/security/recovery regressions remain in the complete suite.
+
+No Prometheus server/Grafana was added: authenticated endpoint and reproducible
+commands suffice for this phase, avoiding a token-storage/scraper stack. Compose
+dependencies remain PostgreSQL/LocalStack/Keycloak. No automatic repair, advanced
+tracing or final challenge audit was implemented.
+
+Operation and metric catalog: [PHASE11_OPERATIONS.md](PHASE11_OPERATIONS.md).
+Verification and inventory: [PHASE11_REPORT.md](PHASE11_REPORT.md).
+
 ## Testing notes
 
 - Unit tests cover config parsing, pool config construction, and readiness behavior via a
@@ -1098,3 +1504,121 @@ Do not treat a skipped integration suite as PostgreSQL validation.
   validated successfully once Docker Desktop engine was running.
 - `go test -race ./...` still requires CGO on Windows (`CGO_ENABLED=1` plus a C toolchain). This does
   not block unit tests or `go vet`.
+
+## Phase 12: final audit and delivery
+
+This section supersedes historical operational limitations/contract descriptions
+in phases 0–11. The original evaluator specification is preserved byte for byte
+in [CHALLENGE_SPEC.md](CHALLENGE_SPEC.md), Git blob
+`b19a1a5cdc00fa22e13fae9582777ecb7b6ad248` from commit `bdd9e70`.
+The final requirement matrix and actual execution evidence are in
+[FINAL_AUDIT.md](FINAL_AUDIT.md) and [FINAL_DELIVERY_REPORT.md](FINAL_DELIVERY_REPORT.md).
+No historical report is used as proof of a test execution in phase 12.
+
+### Original contracts and compatibility
+
+HTTP accepts the original wallet body with currency inferred from initialBalance;
+creation returns id/version as well as the prior detailed fields. Wagers accept
+kind/gameId; legacy type remains accepted. Conflicting aliases are rejected.
+Replies expose status/balance as aliases of the persisted state/observedBalance.
+Reconciliation returns storedBalance, calculatedBalance, stored-minus-calculated
+difference, consistent and checkedEntries, alongside the phase 10 detailed report.
+Reconstruction/difference outside int64 is null rather than fabricated.
+
+The original nested WagerTransactionRequested SQS envelope is strictly decoded and
+normalized to the internal v1 representation. Its data.idempotencyKey uses the
+same provider-scoped durable key as HTTP inside the Inbox/financial transaction.
+Legacy flat envelopes remain recoverable; optional new fields omit empty JSON
+values so historical Inbox hashes are preserved. Inbox hash includes transport
+metadata; financial hash excludes it. BuildSendInput emits normalized flat v1.
+
+Financial SHA-256 v3 marshals a map (encoding/json sorts keys) containing version,
+providerId, externalTransactionId, playerId, walletId, type, amountCents, currency,
+roundId, gameId and referenceExternalTransactionId. Money cents is int64. Original
+protocol requires gameId; transport/key/correlation do not participate. Legacy
+v1/v2 hashes remain byte-compatible for records/requests lacking game metadata.
+No migration rewrites those identities. Empty historical game_id is unknown,
+not invented metadata. Optional WIN references resolve a processed BET in the
+same provider/player/wallet/currency/round; missing references reject WIN, while
+REFUND/ROLLBACK retain their durable pending-reference policy.
+
+### Financial corrections and schema evolution
+
+All five external types preserve original value rules: BET/WIN/REFUND/ROLLBACK
+positive; LOSS zero. Two old rollback-LOSS fixtures now use one cent so they still
+reach/assert REFERENCE_TYPE_INVALID; explicit zero-reversal regressions assert
+invalid input. Money supports the documented ISO subset BRL/USD/EUR, rejects
+uninitialized negation/comparison, and subtracts safely without negating MinInt64.
+Wallet creation/update timestamps are carried by the aggregate and SQL mappings,
+restored without financial transitions. Legacy Rehydrate without metadata keeps
+unknown zero timestamps; production reads use RehydrateWithTimestamps.
+
+Migration 6 adds game metadata without altering migrations 1–5 or existing hashes,
+prevents a second positive OPENING, and rejects UPDATE/DELETE of terminal wagers.
+Ledger's existing statement trigger rejects UPDATE/DELETE/TRUNCATE. The full
+migration chain is tested UP/DOWN/UP only inside a disposable schema. Primary
+schema received forward migration 6 and remained clean; no primary rollback.
+
+The UoW remains the boundary for wallet/transaction/ledger/Inbox/Outbox atomicity.
+The schema enforces foreign keys, uniqueness, nonnegative balances and exact ledger
+arithmetic. It does not add a deferred cross-table assertion requiring every
+arbitrary SQL wallet update to include a ledger/Outbox row. Administrative SQL
+can still corrupt state or disable triggers; controlled-corruption reconciliation
+tests demonstrate detection. Runtime credentials must be restricted, migration
+credentials separate, and direct writes outside the application forbidden.
+
+### Broker permissions and deployment boundary
+
+LocalStack test/test credentials and Compose development mode do not prove AWS IAM
+policy enforcement. Configuration rejects dummy broker credentials and plaintext
+custom endpoints outside development/test. A command producer is a trusted
+internal ingress that has already authenticated/authorized the provider; external
+providers must not get direct write permission to the shared command queue.
+The consumer validates business scope but cannot derive a signed provider identity
+from an arbitrary message body. Required production grants (resource ARNs scoped
+to the corresponding queues, no wildcard resource or sqs:*):
+
+| Principal | Queue | Actions |
+| --- | --- | --- |
+| Trusted internal command ingress | Commands | SendMessage, GetQueueUrl |
+| Financial consumer | Commands | ReceiveMessage, DeleteMessage, ChangeMessageVisibility, GetQueueAttributes, GetQueueUrl |
+| Outbox publisher | Events | SendMessage, GetQueueAttributes, GetQueueUrl |
+| Operational/readiness sampler | Commands/events/DLQ as needed | GetQueueAttributes, GetQueueUrl |
+
+When the same process performs consumption/publication/sampling, its role needs
+that union; it still must not SendMessage to commands. Deny untrusted publishers
+in queue resource policies, use workload identity/default AWS credential chain,
+TLS and least privilege. Real AWS identities/resource policies were not available
+in this local audit, so enforcement remains PARTIAL/NOT_VERIFIED, never PASS.
+No production secrets are checked in or needed by the backend for OIDC validation.
+
+### Runtime health, test runner and interruption evidence
+
+Readiness now probes PG and enabled command/event FIFO queues, bounded by the health
+timeout with one-second broker caching. Liveness remains independent. Transient
+processing failure schedules visibility with exponential backoff capped by configured
+visibility and no ACK; permanent errors rely on redrive. Financial idempotency
+conflict/external duplicate with a different key is permanent, not endless retry.
+
+Dockerfile declares Go 1.27.0; its test stage enables CGO/GCC and runtime stage
+uses a static binary without root. docker-compose.audit.yml runs the entire suite
+against real PG, LocalStack and Keycloak using the canonical localhost issuer.
+Linux/race/CGO tests now pass, replacing the historical Windows gcc limitation.
+Desktop outbound host access was verified; API inbound host publication was not
+reachable on this Windows, so the host Go API is the verified Windows path.
+The optional app profile is intended for Linux host networking.
+
+Subprocess tests launch three separate OS processes with independent Go heaps,
+pools and SDK clients. They prove two BETs of 80 over 100, 50 equal attempts,
+cross-type reversal contention, 50 actual SDK deliveries and 100 published events.
+Separate tests really Kill a consumer after partial uncommitted SQL writes and
+again after commit before ACK, then restart a new process and consume the actual
+redelivery. Outbox boundary tests remain deterministic fault/lease simulations;
+there is no claim of a real publisher SIGKILL test. Existing pending/reconciliation/
+HTTP concurrency tests retain separate pools and all earlier assertions.
+
+Smoke script scripts/final-smoke.ps1 uses local Keycloak fixtures and a unique
+wallet, validates original HTTP/SQS contracts, authorization, Inbox, Outbox,
+reconciliation and metrics, and prints only sanitized results. It intentionally
+preserves that wallet's financial history. No test or operational step rolls back
+primary financial data. No frontend, auto-repair, tracing or load benchmark was added.

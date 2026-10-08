@@ -41,10 +41,16 @@ func (s *AuthorizedService) ProcessHTTPWager(ctx context.Context, p identity.Pri
 	}
 	// Structured encoding avoids separator ambiguity; the namespace separates
 	// HTTP identities from historical/internal raw keys without a schema change.
-	pair, _ := json.Marshal([2]string{p.ProviderID, in.IdempotencyKey})
-	hash := sha256.Sum256(pair)
-	in.IdempotencyKey = "oidc:v1:" + hex.EncodeToString(hash[:])
+	in.IdempotencyKey = ScopedIdempotencyKey(p.ProviderID, in.IdempotencyKey)
 	return s.core.ProcessHTTPWager(ctx, in)
+}
+
+// ScopedIdempotencyKey is shared by authenticated HTTP and broker commands.
+// The broker channel must be restricted to trusted internal producers.
+func ScopedIdempotencyKey(provider, key string) string {
+	pair, _ := json.Marshal([2]string{provider, key})
+	hash := sha256.Sum256(pair)
+	return "oidc:v1:" + hex.EncodeToString(hash[:])
 }
 
 func (s *AuthorizedService) GetTransaction(ctx context.Context, p identity.Principal, id wager.TransactionID) (wager.Transaction, error) {

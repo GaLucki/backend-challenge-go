@@ -1,0 +1,27 @@
+services:
+  audit:
+    profiles: [audit]
+    build:
+      context: .
+      target: test
+    image: wagering-audit:go1.27.0
+    # Keeps the IdP's canonical localhost issuer/JWKS reachable and unchanged.
+    # Requires Linux or Docker Desktop with host networking enabled.
+    network_mode: host
+    environment:
+      CGO_ENABLED: "1"
+      TEST_DATABASE_URL: postgres://wagering:wagering@localhost:5432/wagering?sslmode=disable
+      TEST_SQS_ENDPOINT: http://localhost:4566
+      TEST_OIDC_ISSUER_URL: http://localhost:8081/realms/jungle-gaming
+      TEST_KEYCLOAK_HEALTH_URL: http://localhost:9090/health/ready
+    volumes:
+      - audit_go_build:/root/.cache/go-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+volumes:
+  audit_go_build:

@@ -35,6 +35,7 @@ type TransactionEventData struct {
 	ExternalTransactionID          wager.ExternalTransactionID `json:"externalTransactionId,omitempty"`
 	PlayerID                       wager.PlayerID              `json:"playerId"`
 	RoundID                        wager.RoundID               `json:"roundId,omitempty"`
+	GameID                         string                      `json:"gameId,omitempty"`
 	Type                           wager.Type                  `json:"type"`
 	State                          wager.State                 `json:"state"`
 	FailureCode                    wager.FailureCode           `json:"failureCode,omitempty"`
@@ -59,6 +60,7 @@ func writeEvents(ctx context.Context, r ports.Repositories, tx wager.Transaction
 		eventType = EventWagerPendingReference
 	}
 	data := TransactionEventData{TransactionID: tx.ID(), WalletID: w.ID(), ProviderID: tx.ProviderID(), ExternalTransactionID: tx.ExternalTransactionID(), PlayerID: tx.PlayerID(), RoundID: tx.RoundID(), Type: tx.Type(), State: tx.State(), FailureCode: tx.FailureCode(), Money: tx.Amount().External(), ReferenceExternalTransactionID: tx.ReferenceExternalTransactionID()}
+	data.GameID = tx.GameID()
 	if err := storeEvent(ctx, r.Outbox, tx, eventType, string(tx.ID()), correlation, data); err != nil {
 		return err
 	}

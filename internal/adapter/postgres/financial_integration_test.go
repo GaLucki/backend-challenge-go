@@ -56,6 +56,9 @@ func integrationPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	})
 	applyMigration(t, ctx, pool, "000001_app_metadata.up.sql")
 	applyMigration(t, ctx, pool, "000002_financial_persistence.up.sql")
+	// Repository metadata is current while this fixture still exercises the
+	// historical migration 2 lifecycle independently from migrations 3-5.
+	applyMigration(t, ctx, pool, "000006_final_contract_metadata.up.sql")
 	return pool, ctx
 }
 func applyMigration(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name string) {

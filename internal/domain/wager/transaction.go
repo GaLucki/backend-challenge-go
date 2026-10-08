@@ -39,6 +39,7 @@ type Transaction struct {
 	txType                         Type
 	amount                         money.Money
 	roundID                        RoundID
+	gameID                         string
 	referenceExternalTransactionID ExternalTransactionID
 	state                          State
 	failureCode                    FailureCode
@@ -54,6 +55,7 @@ type ExternalParams struct {
 	PlayerID                       PlayerID
 	WalletID                       WalletID
 	RoundID                        RoundID
+	GameID                         string
 	Type                           Type
 	Amount                         money.Money
 	ReferenceExternalTransactionID ExternalTransactionID
@@ -87,8 +89,11 @@ func NewExternal(p ExternalParams) (Transaction, error) {
 	if strings.TrimSpace(string(p.RoundID)) == "" {
 		return Transaction{}, ErrInvalidRoundID
 	}
+	if p.GameID != "" && strings.TrimSpace(p.GameID) != p.GameID {
+		return Transaction{}, ErrInvalidGameID
+	}
 
-	return newTransaction(
+	tx, err := newTransaction(
 		p.ID,
 		p.ProviderID,
 		p.ExternalTransactionID,
@@ -101,6 +106,11 @@ func NewExternal(p ExternalParams) (Transaction, error) {
 		StatePending,
 		p.Now,
 	)
+	if err != nil {
+		return Transaction{}, err
+	}
+	tx.gameID = p.GameID
+	return tx, err
 }
 
 // NewOpening creates an internal OPENING transaction in PROCESSED state.
@@ -191,6 +201,7 @@ func (t Transaction) Currency() string    { return t.currency }
 func (t Transaction) Type() Type          { return t.txType }
 func (t Transaction) Amount() money.Money { return t.amount }
 func (t Transaction) RoundID() RoundID    { return t.roundID }
+func (t Transaction) GameID() string      { return t.gameID }
 func (t Transaction) ReferenceExternalTransactionID() ExternalTransactionID {
 	return t.referenceExternalTransactionID
 }

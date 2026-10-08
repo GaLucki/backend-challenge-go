@@ -3,6 +3,7 @@ package wallet
 import "errors"
 
 var (
+	ErrInvalidTimestamp        = errors.New("invalid wallet timestamp")
 	ErrInvalidID               = errors.New("invalid wallet id")
 	ErrInvalidPlayerID         = errors.New("invalid player id")
 	ErrInvalidCurrency         = errors.New("invalid wallet currency")

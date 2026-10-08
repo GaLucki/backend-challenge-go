@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 )
 
 type Service struct {
+	metrics       ports.Telemetry
+	logger        *slog.Logger
 	uow           ports.UnitOfWork
 	now           func() time.Time
 	newID         func() (string, error)
@@ -33,7 +36,13 @@ func randomID() (string, error) {
 	return hex.EncodeToString(bytes[:]), nil
 }
 
-func (s *Service) CreateWallet(ctx context.Context, in CreateWalletInput) (CreateWalletResult, error) {
+func (s *Service) CreateWallet(ctx context.Context, in CreateWalletInput) (result CreateWalletResult, resultErr error) {
+	started := time.Now()
+	defer func() {
+		if in.InitialBalance.IsPositive() {
+			s.observeFinancial(ctx, WagerInput{Type: wager.TypeOpening, WalletID: result.WalletID, CorrelationID: in.CorrelationID}, WagerResult{TransactionID: result.OpeningTransactionID, State: wager.StateProcessed}, resultErr, started, "new")
+		}
+	}()
 	if in.InitialBalance.Currency() == "" || in.InitialBalance.IsNegative() {
 		return CreateWalletResult{}, ErrInvalidAmount
 	}
@@ -51,7 +60,7 @@ func (s *Service) CreateWallet(ctx context.Context, in CreateWalletInput) (Creat
 	if err != nil {
 		return CreateWalletResult{}, ErrInvalidInput
 	}
-	result := CreateWalletResult{WalletID: w.ID(), PlayerID: w.PlayerID(), Balance: w.Balance().External(), WalletVersion: w.Version()}
+	result = CreateWalletResult{WalletID: w.ID(), PlayerID: w.PlayerID(), Balance: w.Balance().External(), WalletVersion: w.Version()}
 	err = s.uow.WithinTransaction(ctx, func(r ports.Repositories) error {
 		if err := r.Wallets.Create(ctx, w); err != nil {
 			if errors.Is(err, ports.ErrUniqueViolation) {
@@ -98,7 +107,7 @@ func validateWager(in WagerInput) error {
 			return ErrInvalidAmount
 		}
 	case wager.TypeRefund, wager.TypeRollback:
-		if in.Amount.IsNegative() {
+		if !in.Amount.IsPositive() {
 			return ErrInvalidAmount
 		}
 	case wager.TypeLoss:
@@ -112,7 +121,7 @@ func validateWager(in WagerInput) error {
 		if strings.TrimSpace(string(in.ReferenceExternalTransactionID)) == "" {
 			return ErrInvalidInput
 		}
-	} else if in.ReferenceExternalTransactionID != "" {
+	} else if in.Type != wager.TypeWin && in.ReferenceExternalTransactionID != "" {
 		return ErrInvalidInput
 	}
 	if in.Amount.Currency() == "" {
@@ -128,11 +137,12 @@ func validateWager(in WagerInput) error {
 
 // ProcessWager is the transport-independent financial entry point. External
 // identity uniqueness still applies; future delivery adapters can reuse the core.
-func (s *Service) ProcessWager(ctx context.Context, in WagerInput) (WagerResult, error) {
+func (s *Service) ProcessWager(ctx context.Context, in WagerInput) (result WagerResult, resultErr error) {
+	started := time.Now()
+	defer func() { s.observeFinancial(ctx, in, result, resultErr, started, "new") }()
 	if err := validateWager(in); err != nil {
 		return WagerResult{}, err
 	}
-	var result WagerResult
 	err := s.uow.WithinTransaction(ctx, func(r ports.Repositories) error {
 		var err error
 		result, err = s.process(ctx, r, in)
@@ -145,54 +155,70 @@ func (s *Service) ProcessWager(ctx context.Context, in WagerInput) (WagerResult,
 }
 
 // ProcessHTTPWager adds durable idempotency without importing an HTTP transport.
-func (s *Service) ProcessHTTPWager(ctx context.Context, in HTTPWagerInput) (WagerResult, error) {
+func (s *Service) ProcessHTTPWager(ctx context.Context, in HTTPWagerInput) (result WagerResult, resultErr error) {
+	started := time.Now()
+	defer func() {
+		outcome := "new"
+		if result.IdempotentReplay {
+			outcome = "replay"
+		}
+		s.observeFinancial(ctx, in.WagerInput, result, resultErr, started, outcome)
+	}()
 	if strings.TrimSpace(in.IdempotencyKey) == "" {
 		return WagerResult{}, ErrIdempotencyKeyRequired
 	}
-	hash := CanonicalPayloadHash(in.WagerInput)
-	var result WagerResult
 	err := s.uow.WithinTransaction(ctx, func(r ports.Repositories) error {
-		claimed, err := r.Idempotency.Claim(ctx, in.IdempotencyKey, hash, s.now())
-		if err != nil {
-			return err
-		}
-		if !claimed {
-			record, err := r.Idempotency.Get(ctx, in.IdempotencyKey)
-			if err != nil {
-				return err
-			}
-			if record.PayloadHash != hash {
-				return ErrIdempotencyConflict
-			}
-			if record.CompletedAt == nil || len(record.Result) == 0 {
-				return ErrPersistence
-			}
-			if err = json.Unmarshal(record.Result, &result); err != nil {
-				return ErrPersistence
-			}
-			result.IdempotentReplay = true
-			return nil
-		}
-		// Existing keys take precedence: even an invalid changed operation is
-		// a payload conflict. New invalid claims are rolled back with the request.
-		if err := validateWager(in.WagerInput); err != nil {
-			return err
-		}
-		result, err = s.process(ctx, r, in.WagerInput)
-		if err != nil {
-			return err
-		}
-		encoded, err := json.Marshal(result)
-		if err != nil {
-			return ErrPersistence
-		}
-		completed := result.ProcessedAt
-		return r.Idempotency.Complete(ctx, ports.IdempotencyRecord{Key: in.IdempotencyKey, PayloadHash: hash, TransactionID: result.TransactionID, Result: encoded, CompletedAt: &completed})
+		var err error
+		result, err = s.processIdempotent(ctx, r, in)
+		return err
 	})
 	if err != nil {
 		return WagerResult{}, applicationError(err)
 	}
 	return result, nil
+}
+
+// Reused inside the caller's UoW, including Inbox. It never begins a nested
+// transaction, and neither transport observes success until that UoW commits.
+func (s *Service) processIdempotent(ctx context.Context, r ports.Repositories, in HTTPWagerInput) (WagerResult, error) {
+	hash := CanonicalPayloadHash(in.WagerInput)
+	claimed, err := r.Idempotency.Claim(ctx, in.IdempotencyKey, hash, s.now())
+	if err != nil {
+		return WagerResult{}, err
+	}
+	var result WagerResult
+	if !claimed {
+		record, err := r.Idempotency.Get(ctx, in.IdempotencyKey)
+		if err != nil {
+			return result, err
+		}
+		if record.PayloadHash != hash {
+			return result, ErrIdempotencyConflict
+		}
+		if record.CompletedAt == nil || len(record.Result) == 0 {
+			return result, ErrPersistence
+		}
+		if json.Unmarshal(record.Result, &result) != nil {
+			return WagerResult{}, ErrPersistence
+		}
+		result.IdempotentReplay = true
+		return result, nil
+	}
+	// An existing key takes precedence over changed typed input validation.
+	if err := validateWager(in.WagerInput); err != nil {
+		return result, err
+	}
+	result, err = s.process(ctx, r, in.WagerInput)
+	if err != nil {
+		return WagerResult{}, err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return WagerResult{}, ErrPersistence
+	}
+	completed := result.ProcessedAt
+	err = r.Idempotency.Complete(ctx, ports.IdempotencyRecord{Key: in.IdempotencyKey, PayloadHash: hash, TransactionID: result.TransactionID, Result: encoded, CompletedAt: &completed})
+	return result, err
 }
 
 func (s *Service) process(ctx context.Context, r ports.Repositories, in WagerInput) (WagerResult, error) {
@@ -219,7 +245,7 @@ func (s *Service) process(ctx context.Context, r ports.Repositories, in WagerInp
 		return WagerResult{}, ErrPersistence
 	}
 	at := s.now()
-	tx, err := wager.NewExternal(wager.ExternalParams{ID: wager.TransactionID(id), ProviderID: in.ProviderID, ExternalTransactionID: in.ExternalTransactionID, PlayerID: in.PlayerID, WalletID: wager.WalletID(in.WalletID), Type: in.Type, Amount: in.Amount, RoundID: in.RoundID, Now: at, ReferenceExternalTransactionID: in.ReferenceExternalTransactionID})
+	tx, err := wager.NewExternal(wager.ExternalParams{ID: wager.TransactionID(id), ProviderID: in.ProviderID, ExternalTransactionID: in.ExternalTransactionID, PlayerID: in.PlayerID, WalletID: wager.WalletID(in.WalletID), Type: in.Type, Amount: in.Amount, RoundID: in.RoundID, GameID: in.GameID, Now: at, ReferenceExternalTransactionID: in.ReferenceExternalTransactionID})
 	if err != nil {
 		return WagerResult{}, ErrInvalidInput
 	}
@@ -235,15 +261,23 @@ func (s *Service) process(ctx context.Context, r ports.Repositories, in WagerInp
 	before, version := w.Balance(), w.Version()
 	var operationErr error
 	var direction ports.LedgerDirection
-	switch in.Type {
-	case wager.TypeBet:
-		direction = ports.Debit
-		operationErr = w.Debit(in.Amount)
-	case wager.TypeWin:
-		direction = ports.Credit
-		operationErr = w.Credit(in.Amount)
-	}
 	failure := wager.FailureCode("")
+	if in.Type == wager.TypeWin && in.ReferenceExternalTransactionID != "" {
+		failure, err = validateWinReference(ctx, r, tx)
+		if err != nil {
+			return WagerResult{}, err
+		}
+	}
+	if failure == "" {
+		switch in.Type {
+		case wager.TypeBet:
+			direction = ports.Debit
+			operationErr = w.Debit(in.Amount)
+		case wager.TypeWin:
+			direction = ports.Credit
+			operationErr = w.Credit(in.Amount)
+		}
+	}
 	if errors.Is(operationErr, wallet.ErrInsufficientFunds) {
 		failure = FailureInsufficientFunds
 	} else if errors.Is(operationErr, money.ErrOverflow) || errors.Is(operationErr, wallet.ErrVersionOverflow) {

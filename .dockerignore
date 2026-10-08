@@ -1,0 +1,10 @@
+.git
+.env
+.tmp-*.log
+*.exe
+*.test
+*.out
+bin
+dist
+vendor
+artifacts

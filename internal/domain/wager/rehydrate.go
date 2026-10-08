@@ -17,7 +17,7 @@ func Rehydrate(p PersistedState) (Transaction, error) {
 	var err error
 	if p.Type == TypeOpening {
 		t, err = NewOpening(OpeningParams{ID: p.ID, PlayerID: p.PlayerID, WalletID: p.WalletID, Amount: p.Amount, Now: p.CreatedAt})
-		if p.ProviderID != "" || p.ExternalTransactionID != "" || p.RoundID != "" || p.ReferenceExternalTransactionID != "" || p.State != StateProcessed {
+		if p.ProviderID != "" || p.ExternalTransactionID != "" || p.RoundID != "" || p.GameID != "" || p.ReferenceExternalTransactionID != "" || p.State != StateProcessed {
 			return Transaction{}, ErrInvalidState
 		}
 	} else {
